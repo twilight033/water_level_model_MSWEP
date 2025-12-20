@@ -1,0 +1,48 @@
+[project]
+name = "water_level_model"
+version = "0.1.0"
+description = "Multi-task LSTM for joint discharge (Q) and water level (h) prediction"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "user" }]
+
+# 核心依赖（不包含本地 hydrodataset，可单独开启可选组）
+dependencies = [
+  "numpy>=1.23,<2.0",
+  "pandas>=1.5",
+  "xarray>=2023.1",
+  "torch>=2.1",
+  "tqdm>=4.66",
+  "matplotlib>=3.6",
+  "HydroErr>=1.0",
+  "openpyxl>=3.1",
+  "pyarrow>=12.0",
+  "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# 如需启用本地 hydrodataset，请先在 [tool.uv.sources] 中正确配置路径后：
+#   uv pip install -e .[hydro]
+hydro = [
+  "hydrodataset",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# 本项目不是一个可分发的Python包，避免自动发现顶层目录为包
+packages = []
+py-modules = []
+
+[tool.uv]
+# 默认索引即可，如需 PyTorch GPU 版本，可按需添加 extra-index-url
+# index-url = "https://pypi.org/simple"
+
+[tool.uv.sources]
+# 将下方路径改为你本地 hydrodataset 的实际路径（支持绝对或相对路径）
+# 配置完成后，可通过可选依赖组启用 hydrodataset
+hydrodataset = { path = "D:/code/hydrodataset", editable = true }
+
+

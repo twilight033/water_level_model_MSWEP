@@ -1,0 +1,81 @@
+# Data directories
+CAMELS/
+data/
+camelsh_data/CAMELSH/*.tmp
+MSWEP/*.csv
+
+# Results and outputs
+results/images/
+results/reports/
+results/models/
+results/logs/
+models/
+logs/
+
+# Model files
+*.pth
+*.pt
+
+# Image files
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.svg
+
+# Debug and test scripts
+test_*.py
+debug_*.py
+check_*.py
+diagnose_*.py
+analyze_*.py
+compare_*.py
+scan_*.py
+quick_*.py
+create_sample_*.py
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.env
+.venv/
+venv/
+env/
+ENV/
+
+# Package manager
+uv.lock
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
