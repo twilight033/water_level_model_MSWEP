@@ -34,6 +34,7 @@ scan_*.py
 quick_*.py
 create_sample_*.py
 
+
 # Python cache and compiled files
 __pycache__/
 *.py[cod]
