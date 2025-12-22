@@ -87,7 +87,7 @@ def create_missing_mask(data_df, missing_ratio, seed=42):
     data_df : pd.DataFrame
         原始数据
     missing_ratio : float
-        缺失比例 (0.0-1.0)
+        缺失比例 (0.0-1.0)，0表示不缺失（保持完整）
     seed : int
         随机种子
     
@@ -96,6 +96,11 @@ def create_missing_mask(data_df, missing_ratio, seed=42):
     pd.DataFrame
         带有人工缺失的数据（缺失部分设为NaN）
     """
+    # 如果缺失比例为0，直接返回原始数据的副本
+    if missing_ratio == 0.0:
+        print(f"  保持数据完整（无人工缺失）")
+        return data_df.copy()
+    
     np.random.seed(seed)
     
     # 复制原始数据
@@ -114,12 +119,13 @@ def create_missing_mask(data_df, missing_ratio, seed=42):
             # 计算要隐藏的数量
             n_to_hide = int(valid_count * missing_ratio)
             
-            # 随机选择要隐藏的索引
-            valid_positions = np.where(valid_indices)[0]
-            hide_positions = np.random.choice(valid_positions, size=n_to_hide, replace=False)
-            
-            # 设置为NaN
-            masked_data.iloc[hide_positions, masked_data.columns.get_loc(col)] = np.nan
+            if n_to_hide > 0:
+                # 随机选择要隐藏的索引
+                valid_positions = np.where(valid_indices)[0]
+                hide_positions = np.random.choice(valid_positions, size=n_to_hide, replace=False)
+                
+                # 设置为NaN
+                masked_data.iloc[hide_positions, masked_data.columns.get_loc(col)] = np.nan
     
     # 统计缺失情况
     original_valid_count = original_valid.sum().sum()
@@ -848,15 +854,18 @@ def filter_basins_with_valid_data(camelsh_reader, basin_list, time_range, max_ba
     return valid_basins
 
 
-def run_ablation_experiment(missing_ratio, flow_data_original, waterlevel_data_original, 
+def run_ablation_experiment(flow_missing_ratio, waterlevel_missing_ratio, 
+                            flow_data_original, waterlevel_data_original, 
                             experiment_name, **kwargs):
     """
     运行单个消融实验
     
     Parameters
     ----------
-    missing_ratio : float
-        标签缺失比例
+    flow_missing_ratio : float
+        径流标签缺失比例 (0.0表示完整，>0表示缺失)
+    waterlevel_missing_ratio : float
+        水位标签缺失比例 (0.0表示完整，>0表示缺失)
     flow_data_original : pd.DataFrame
         原始径流数据
     waterlevel_data_original : pd.DataFrame
@@ -872,15 +881,17 @@ def run_ablation_experiment(missing_ratio, flow_data_original, waterlevel_data_o
         实验结果
     """
     print(f"\n{'='*80}")
-    print(f"实验: {experiment_name} - 标签缺失比例: {missing_ratio:.0%}")
+    print(f"实验: {experiment_name}")
+    print(f"  径流标签缺失: {flow_missing_ratio:.0%}")
+    print(f"  水位标签缺失: {waterlevel_missing_ratio:.0%}")
     print(f"{'='*80}")
     
     # 创建人工缺失的数据
-    print(f"\n创建标签缺失数据（缺失比例: {missing_ratio:.0%}）...")
+    print(f"\n创建标签缺失数据...")
     print("径流数据:")
-    flow_data_masked = create_missing_mask(flow_data_original, missing_ratio, seed=42)
+    flow_data_masked = create_missing_mask(flow_data_original, flow_missing_ratio, seed=42)
     print("水位数据:")
-    waterlevel_data_masked = create_missing_mask(waterlevel_data_original, missing_ratio, seed=43)
+    waterlevel_data_masked = create_missing_mask(waterlevel_data_original, waterlevel_missing_ratio, seed=43)
     
     # 创建数据集
     print("\n创建数据集...")
@@ -1034,7 +1045,8 @@ def run_ablation_experiment(missing_ratio, flow_data_original, waterlevel_data_o
     
     # 返回结果
     results = {
-        'missing_ratio': missing_ratio,
+        'flow_missing_ratio': flow_missing_ratio,
+        'waterlevel_missing_ratio': waterlevel_missing_ratio,
         'experiment_name': experiment_name,
         'best_epoch': best_epoch,
         'best_val_nse_avg': best_val_nse_avg,
@@ -1188,14 +1200,37 @@ if __name__ == "__main__":
         'n_epochs': EPOCHS,
     }
     
-    # 运行消融实验
-    missing_ratios = [0.0, 0.1, 0.3, 0.5]  # 0%, 10%, 30%, 50% 缺失
+    # 定义消融实验场景
+    # 格式：(径流缺失比例, 水位缺失比例, 实验名称)
+    experiments = [
+        # 基线：两个任务都完整
+        (0.0, 0.0, "baseline_both_complete"),
+        
+        # 场景1：只有径流标签缺失，水位完整
+        (0.1, 0.0, "flow_missing_10pct_wl_complete"),
+        (0.3, 0.0, "flow_missing_30pct_wl_complete"),
+        (0.5, 0.0, "flow_missing_50pct_wl_complete"),
+        
+        # 场景2：只有水位标签缺失，径流完整
+        (0.0, 0.1, "flow_complete_wl_missing_10pct"),
+        (0.0, 0.3, "flow_complete_wl_missing_30pct"),
+        (0.0, 0.5, "flow_complete_wl_missing_50pct"),
+        
+        # 场景3（可选）：两个任务同时缺失（作为对比）
+        (0.3, 0.3, "both_missing_30pct"),
+        (0.5, 0.5, "both_missing_50pct"),
+    ]
+    
+    print(f"\n将运行 {len(experiments)} 个实验:")
+    for i, (flow_miss, wl_miss, name) in enumerate(experiments, 1):
+        print(f"  {i}. {name}: 径流缺失{flow_miss:.0%}, 水位缺失{wl_miss:.0%}")
+    
     all_results = []
     
-    for missing_ratio in missing_ratios:
-        exp_name = f"missing_{int(missing_ratio*100)}pct"
+    for flow_missing_ratio, waterlevel_missing_ratio, exp_name in experiments:
         results, model, means, stds = run_ablation_experiment(
-            missing_ratio=missing_ratio,
+            flow_missing_ratio=flow_missing_ratio,
+            waterlevel_missing_ratio=waterlevel_missing_ratio,
             flow_data_original=full_flow_original,
             waterlevel_data_original=full_waterlevel_original,
             experiment_name=exp_name,
@@ -1217,55 +1252,101 @@ if __name__ == "__main__":
     print("\n" + "="*80)
     print("消融实验汇总结果")
     print("="*80)
-    print(f"{'缺失比例':<12} {'最佳Epoch':<12} {'测试NSE(径流)':<16} {'测试NSE(水位)':<16} {'流域数(径流/水位)'}")
+    print(f"{'实验名称':<35} {'径流缺失':<10} {'水位缺失':<10} {'NSE(径流)':<12} {'NSE(水位)':<12} {'Epoch'}")
     print("-"*80)
     
     for res in all_results:
-        print(f"{res['missing_ratio']:.0%:<12} {res['best_epoch']:<12} "
-              f"{res['test_nse_flow']:<16.4f} {res['test_nse_waterlevel']:<16.4f} "
-              f"{res['n_basins_flow']}/{res['n_basins_waterlevel']}")
+        print(f"{res['experiment_name']:<35} "
+              f"{res['flow_missing_ratio']:<10.0%} "
+              f"{res['waterlevel_missing_ratio']:<10.0%} "
+              f"{res['test_nse_flow']:<12.4f} "
+              f"{res['test_nse_waterlevel']:<12.4f} "
+              f"{res['best_epoch']}")
+    
+    # 分组结果用于可视化
+    baseline = all_results[0]
+    flow_missing_exps = [r for r in all_results if r['waterlevel_missing_ratio'] == 0 and r['flow_missing_ratio'] > 0]
+    wl_missing_exps = [r for r in all_results if r['flow_missing_ratio'] == 0 and r['waterlevel_missing_ratio'] > 0]
+    both_missing_exps = [r for r in all_results if r['flow_missing_ratio'] > 0 and r['waterlevel_missing_ratio'] > 0]
     
     # 绘制对比图
     print("\n正在生成对比图...")
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     
-    missing_pcts = [r['missing_ratio'] * 100 for r in all_results]
-    nse_flow = [r['test_nse_flow'] for r in all_results]
-    nse_waterlevel = [r['test_nse_waterlevel'] for r in all_results]
+    # 图1：径流任务性能 - 对比不同缺失场景
+    ax1 = axes[0, 0]
+    if flow_missing_exps:
+        flow_miss_ratios = [r['flow_missing_ratio'] * 100 for r in flow_missing_exps]
+        flow_nse_when_flow_missing = [r['test_nse_flow'] for r in flow_missing_exps]
+        ax1.plot(flow_miss_ratios, flow_nse_when_flow_missing, 
+                marker='o', linewidth=2, markersize=8, label='径流缺失+水位完整', color='tab:blue')
+    if wl_missing_exps:
+        wl_miss_ratios = [r['waterlevel_missing_ratio'] * 100 for r in wl_missing_exps]
+        flow_nse_when_wl_missing = [r['test_nse_flow'] for r in wl_missing_exps]
+        ax1.plot(wl_miss_ratios, flow_nse_when_wl_missing, 
+                marker='s', linewidth=2, markersize=8, label='径流完整+水位缺失', color='tab:orange')
+    ax1.axhline(y=baseline['test_nse_flow'], color='k', linestyle='--', alpha=0.5, label='基线（两者完整）')
+    ax1.set_xlabel('缺失比例 (%)', fontsize=11)
+    ax1.set_ylabel('径流预测 NSE', fontsize=11)
+    ax1.set_title('径流任务性能 vs 标签缺失', fontsize=13)
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3)
     
-    axes[0].plot(missing_pcts, nse_flow, marker='o', linewidth=2, markersize=8, label='径流')
-    axes[0].plot(missing_pcts, nse_waterlevel, marker='s', linewidth=2, markersize=8, label='水位')
-    axes[0].set_xlabel('标签缺失比例 (%)', fontsize=12)
-    axes[0].set_ylabel('测试集 NSE', fontsize=12)
-    axes[0].set_title('标签缺失对模型性能的影响', fontsize=14)
-    axes[0].legend(fontsize=11)
-    axes[0].grid(True, alpha=0.3)
-    axes[0].set_xticks(missing_pcts)
+    # 图2：水位任务性能 - 对比不同缺失场景
+    ax2 = axes[0, 1]
+    if flow_missing_exps:
+        flow_miss_ratios = [r['flow_missing_ratio'] * 100 for r in flow_missing_exps]
+        wl_nse_when_flow_missing = [r['test_nse_waterlevel'] for r in flow_missing_exps]
+        ax2.plot(flow_miss_ratios, wl_nse_when_flow_missing, 
+                marker='o', linewidth=2, markersize=8, label='径流缺失+水位完整', color='tab:blue')
+    if wl_missing_exps:
+        wl_miss_ratios = [r['waterlevel_missing_ratio'] * 100 for r in wl_missing_exps]
+        wl_nse_when_wl_missing = [r['test_nse_waterlevel'] for r in wl_missing_exps]
+        ax2.plot(wl_miss_ratios, wl_nse_when_wl_missing, 
+                marker='s', linewidth=2, markersize=8, label='径流完整+水位缺失', color='tab:orange')
+    ax2.axhline(y=baseline['test_nse_waterlevel'], color='k', linestyle='--', alpha=0.5, label='基线（两者完整）')
+    ax2.set_xlabel('缺失比例 (%)', fontsize=11)
+    ax2.set_ylabel('水位预测 NSE', fontsize=11)
+    ax2.set_title('水位任务性能 vs 标签缺失', fontsize=13)
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3)
     
-    # NSE下降百分比
-    baseline_flow = nse_flow[0]
-    baseline_waterlevel = nse_waterlevel[0]
-    drop_flow = [(baseline_flow - nse) / baseline_flow * 100 for nse in nse_flow]
-    drop_waterlevel = [(baseline_waterlevel - nse) / baseline_waterlevel * 100 for nse in nse_waterlevel]
+    # 图3：跨任务影响 - 径流任务受水位缺失的影响
+    ax3 = axes[1, 0]
+    if wl_missing_exps:
+        wl_miss_ratios = [r['waterlevel_missing_ratio'] * 100 for r in wl_missing_exps]
+        flow_nse_drops = [(baseline['test_nse_flow'] - r['test_nse_flow']) / baseline['test_nse_flow'] * 100 
+                         for r in wl_missing_exps]
+        ax3.bar(wl_miss_ratios, flow_nse_drops, color='tab:orange', alpha=0.7, width=5)
+        ax3.set_xlabel('水位标签缺失比例 (%)', fontsize=11)
+        ax3.set_ylabel('径流NSE下降 (%)', fontsize=11)
+        ax3.set_title('跨任务影响：水位缺失对径流任务的影响', fontsize=13)
+        ax3.grid(True, alpha=0.3, axis='y')
+        ax3.axhline(y=0, color='k', linestyle='-', linewidth=0.8)
     
-    axes[1].plot(missing_pcts, drop_flow, marker='o', linewidth=2, markersize=8, label='径流')
-    axes[1].plot(missing_pcts, drop_waterlevel, marker='s', linewidth=2, markersize=8, label='水位')
-    axes[1].set_xlabel('标签缺失比例 (%)', fontsize=12)
-    axes[1].set_ylabel('NSE下降比例 (%)', fontsize=12)
-    axes[1].set_title('相对基线的性能下降', fontsize=14)
-    axes[1].legend(fontsize=11)
-    axes[1].grid(True, alpha=0.3)
-    axes[1].set_xticks(missing_pcts)
-    axes[1].axhline(y=0, color='k', linestyle='--', alpha=0.3)
+    # 图4：跨任务影响 - 水位任务受径流缺失的影响
+    ax4 = axes[1, 1]
+    if flow_missing_exps:
+        flow_miss_ratios = [r['flow_missing_ratio'] * 100 for r in flow_missing_exps]
+        wl_nse_drops = [(baseline['test_nse_waterlevel'] - r['test_nse_waterlevel']) / baseline['test_nse_waterlevel'] * 100 
+                       for r in flow_missing_exps]
+        ax4.bar(flow_miss_ratios, wl_nse_drops, color='tab:blue', alpha=0.7, width=5)
+        ax4.set_xlabel('径流标签缺失比例 (%)', fontsize=11)
+        ax4.set_ylabel('水位NSE下降 (%)', fontsize=11)
+        ax4.set_title('跨任务影响：径流缺失对水位任务的影响', fontsize=13)
+        ax4.grid(True, alpha=0.3, axis='y')
+        ax4.axhline(y=0, color='k', linestyle='-', linewidth=0.8)
     
     plt.tight_layout()
-    comparison_file = os.path.join(IMAGES_SAVE_PATH, "ablation_missing_labels_comparison.png")
+    comparison_file = os.path.join(IMAGES_SAVE_PATH, "ablation_asymmetric_missing_comparison.png")
     plt.savefig(comparison_file, dpi=300, bbox_inches='tight')
     print(f"已保存对比图: {comparison_file}")
     
-    # 保存结果到CSV
+    # 保存详细结果到CSV
     results_df = pd.DataFrame({
-        '缺失比例': [r['missing_ratio'] for r in all_results],
+        '实验名称': [r['experiment_name'] for r in all_results],
+        '径流缺失比例': [r['flow_missing_ratio'] for r in all_results],
+        '水位缺失比例': [r['waterlevel_missing_ratio'] for r in all_results],
         '最佳Epoch': [r['best_epoch'] for r in all_results],
         '测试NSE_径流': [r['test_nse_flow'] for r in all_results],
         '测试NSE_水位': [r['test_nse_waterlevel'] for r in all_results],
@@ -1273,9 +1354,43 @@ if __name__ == "__main__":
         '流域数_水位': [r['n_basins_waterlevel'] for r in all_results],
     })
     
-    csv_file = os.path.join(REPORTS_SAVE_PATH, "ablation_missing_labels_results.csv")
+    csv_file = os.path.join(REPORTS_SAVE_PATH, "ablation_asymmetric_missing_results.csv")
     results_df.to_csv(csv_file, index=False, encoding='utf-8-sig')
     print(f"已保存结果CSV: {csv_file}")
     
+    # 打印关键发现
+    print("\n" + "="*80)
+    print("关键发现")
+    print("="*80)
+    
+    if flow_missing_exps and wl_missing_exps:
+        # 对比30%缺失场景
+        flow_30_exp = next((r for r in flow_missing_exps if abs(r['flow_missing_ratio'] - 0.3) < 0.01), None)
+        wl_30_exp = next((r for r in wl_missing_exps if abs(r['waterlevel_missing_ratio'] - 0.3) < 0.01), None)
+        
+        if flow_30_exp and wl_30_exp:
+            print("\n当30%标签缺失时:")
+            print(f"  1. 径流缺失30% + 水位完整:")
+            print(f"     - 径流NSE: {flow_30_exp['test_nse_flow']:.4f} (下降 {(baseline['test_nse_flow']-flow_30_exp['test_nse_flow'])/baseline['test_nse_flow']*100:.1f}%)")
+            print(f"     - 水位NSE: {flow_30_exp['test_nse_waterlevel']:.4f} (下降 {(baseline['test_nse_waterlevel']-flow_30_exp['test_nse_waterlevel'])/baseline['test_nse_waterlevel']*100:.1f}%)")
+            print(f"\n  2. 水位缺失30% + 径流完整:")
+            print(f"     - 径流NSE: {wl_30_exp['test_nse_flow']:.4f} (下降 {(baseline['test_nse_flow']-wl_30_exp['test_nse_flow'])/baseline['test_nse_flow']*100:.1f}%)")
+            print(f"     - 水位NSE: {wl_30_exp['test_nse_waterlevel']:.4f} (下降 {(baseline['test_nse_waterlevel']-wl_30_exp['test_nse_waterlevel'])/baseline['test_nse_waterlevel']*100:.1f}%)")
+            
+            print(f"\n  解读:")
+            flow_self_impact = (baseline['test_nse_flow'] - flow_30_exp['test_nse_flow']) / baseline['test_nse_flow'] * 100
+            flow_cross_impact = (baseline['test_nse_flow'] - wl_30_exp['test_nse_flow']) / baseline['test_nse_flow'] * 100
+            wl_self_impact = (baseline['test_nse_waterlevel'] - wl_30_exp['test_nse_waterlevel']) / baseline['test_nse_waterlevel'] * 100
+            wl_cross_impact = (baseline['test_nse_waterlevel'] - flow_30_exp['test_nse_waterlevel']) / baseline['test_nse_waterlevel'] * 100
+            
+            print(f"     - 径流任务：自身标签缺失影响 {flow_self_impact:.1f}%，水位标签缺失影响 {flow_cross_impact:.1f}%")
+            print(f"     - 水位任务：自身标签缺失影响 {wl_self_impact:.1f}%，径流标签缺失影响 {wl_cross_impact:.1f}%")
+            
+            if abs(flow_cross_impact) < abs(flow_self_impact) / 3:
+                print(f"     - 结论：径流任务主要依赖自身标签，水位标签缺失影响较小（多任务学习有鲁棒性）")
+            if abs(wl_cross_impact) < abs(wl_self_impact) / 3:
+                print(f"     - 结论：水位任务主要依赖自身标签，径流标签缺失影响较小（多任务学习有鲁棒性）")
+    
     print("\n消融实验完成！")
+
 
