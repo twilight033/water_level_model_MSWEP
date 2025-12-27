@@ -161,7 +161,7 @@ class MultiTaskDataset(Dataset):
                 start_pos = self.forcing_time_index.get_loc(time_idx)
         else:
             # 降级方案：使用目标数据的时间索引
-        start_pos = self.data_flow.index.get_loc(time_idx)
+            start_pos = self.data_flow.index.get_loc(time_idx)
         
         x = self.x[basin][start_pos : start_pos + seq_length]
         
@@ -424,7 +424,7 @@ class MultiTaskDataset(Dataset):
             except KeyError:
                 # 如果sel失败，尝试使用原始basin值
                 try:
-            basin_data = data_forcing.sel(basin=basin).to_array().to_numpy().T
+                    basin_data = data_forcing.sel(basin=basin).to_array().to_numpy().T
                 except KeyError:
                     print(f"[警告] 流域 {basin_str} 无法从强迫数据中提取，跳过")
                     continue
@@ -1288,10 +1288,10 @@ if __name__ == "__main__":
     # 从CAMELSH加载非降雨气象变量
     if chosen_forcing_vars_no_precip:
         forcings_ds_no_precip = camelsh_reader.read_ts_xrdataset(
-        gage_id_lst=chosen_basins,
-        t_range=default_range,
+            gage_id_lst=chosen_basins,
+            t_range=default_range,
             var_lst=chosen_forcing_vars_no_precip
-    )
+        )
         print(f"非降雨气象数据形状: {forcings_ds_no_precip.dims}")
         print(f"非降雨气象数据变量: {list(forcings_ds_no_precip.data_vars.keys())}")
     else:
@@ -1510,8 +1510,8 @@ if __name__ == "__main__":
             patience_counter = 0
             # 保存最佳模型状态
             best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-        tqdm.write(
-            f"Epoch {i+1} - "
+            tqdm.write(
+                f"Epoch {i+1} - "
                 f"验证集 NSE (径流): {current_nse_flow:.4f}, "
                 f"NSE (水位): {current_nse_waterlevel:.4f}, "
                 f"平均: {current_nse_avg:.4f} ✓ [新最佳]"

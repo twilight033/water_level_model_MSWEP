@@ -1,0 +1,48 @@
+================================================================================
+USGS Qualifiers 数据合并报告
+================================================================================
+
+1. 数据概览
+----------------------------------------
+总记录数: 210361
+站点数: 1
+时间范围: 2001-01-01 00:00:00+00:00 到 2024-12-31 00:00:00+00:00
+
+2. Qualifier统计
+----------------------------------------
+径流 (Q) qualifiers分布:
+  missing: 193067 (91.78%)
+  A: 17292 (8.22%)
+  A,e: 2 (0.00%)
+
+水位 (H) qualifiers分布:
+  missing: 193068 (91.78%)
+  A: 17293 (8.22%)
+
+3. 权重统计
+----------------------------------------
+径流权重平均: 0.082
+水位权重平均: 0.082
+
+4. 数据完整性
+----------------------------------------
+径流缺失qualifiers: 193067 (91.78%)
+水位缺失qualifiers: 193068 (91.78%)
+
+5. Qualifier含义说明
+----------------------------------------
+  A: Approved for publication
+  P: Provisional data subject to revision
+  e: Estimated value
+  <: Less than indicated value
+  >: Greater than indicated value
+  X: Pumping or nearby pumping
+  &: Value affected by dam, gate, or control structure
+  R: Rating being developed or revised
+  Eqp: Equipment malfunction
+  Bkw: Backwater
+  Ice: Ice affected
+  Ssn: Seasonal site
+  Rat: Rating being developed or revised
+  Dis: Data-collection discontinued
+  Mnt: Site visit or maintenance

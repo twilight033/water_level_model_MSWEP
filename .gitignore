@@ -70,6 +70,7 @@ uv.lock
 
 # Logs
 *.log
+*.json
 
 # OS files
 .DS_Store

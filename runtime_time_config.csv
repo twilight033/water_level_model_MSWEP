@@ -1,0 +1,4 @@
+dataset,start_date,end_date,duration_days,ratio
+Train,1980-01-01,2006-12-31,9861,0.6
+Valid,2006-12-31,2015-12-31,3287,0.2
+Test,2015-12-31,2024-12-31,3287,0.2
