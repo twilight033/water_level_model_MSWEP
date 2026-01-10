@@ -340,6 +340,11 @@ class SingleTaskDataset(Dataset):
         self.data_aux = data_aux  # 辅助数据（另一个目标变量）
 
         self.time_index = {}
+        
+        # 加载权重数据（如果提供）
+        self.qualifiers_weights = None
+        if qualifiers_csv_path:
+            self._load_qualifiers_weights(qualifiers_csv_path)
 
         # 加载和预处理数据
         self._load_data()
