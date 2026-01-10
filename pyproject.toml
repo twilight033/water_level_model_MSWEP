@@ -38,11 +38,16 @@ py-modules = []
 
 [tool.uv]
 # 默认索引即可，如需 PyTorch GPU 版本，可按需添加 extra-index-url
-# index-url = "https://pypi.org/simple"
+index-strategy = "unsafe-best-match"  # 允许从多个索引找最佳版本
 
 [tool.uv.sources]
 # 将下方路径改为你本地 hydrodataset 的实际路径（支持绝对或相对路径）
 # 配置完成后，可通过可选依赖组启用 hydrodataset
 hydrodataset = { path = "D:/code/hydrodataset", editable = true }
+torch = { index = "pytorch-gpu" }
+torchvision = { index = "pytorch-gpu" }
+torchaudio = { index = "pytorch-gpu" } 
 
-
+[[tool.uv.index]]
+name = "pytorch-gpu"
+url = "https://download.pytorch.org/whl/cu121"

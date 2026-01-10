@@ -1148,7 +1148,7 @@ if __name__ == "__main__":
     # 从MSWEP加载降雨
     print("\n从MSWEP加载降雨数据...")
     mswep_precip_df = load_mswep_data(
-        file_path="MSWEP/mswep_basin_mean_3hourly_2001_2024.csv",
+        file_path="MSWEP/mswep_220basins_mean_3hourly_1980_2024.csv",
         basin_ids=chosen_basins,
         time_range=default_range
     )
