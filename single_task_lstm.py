@@ -21,6 +21,11 @@ DEVICE = torch.device(
     "cuda:0" if torch.cuda.is_available() else "cpu"
 )  # check if GPU is available
 
+# 是否使用 USGS qualifiers 权重对 loss 加权
+# - True: 训练时读取 qualifiers_output/camelsh_with_qualifiers.csv，并在 loss 中应用 Q_weight/H_weight
+# - False: 不读取权重文件，等价于不加权训练
+USE_QUALIFIER_WEIGHTS = True
+
 # 时间划分比例（经验值）：按每个流域自身完整时间序列划分
 TRAIN_RATIO = 0.6
 VALID_RATIO = 0.2
@@ -342,6 +347,7 @@ class SingleTaskDataset(Dataset):
         self.time_index = {}
         
         # 加载权重数据（如果提供）
+        self.use_qualifier_weights = bool(qualifiers_csv_path)
         self.qualifiers_weights = None
         if qualifiers_csv_path:
             self._load_qualifiers_weights(qualifiers_csv_path)
@@ -436,12 +442,16 @@ class SingleTaskDataset(Dataset):
             print(f"  目标时间: {end_time}")
             raise ValueError("目标值包含NaN")
         
-        # 查询权重（如果有）
-        weight = self._get_sample_weight(basin, end_time)
-        
+        if self.use_qualifier_weights:
+            # 查询权重（如果有）
+            weight = self._get_sample_weight(basin, end_time)
+            return torch.from_numpy(xc).float(), torch.from_numpy(
+                np.array([y], dtype=np.float32)
+            ), weight
+
         return torch.from_numpy(xc).float(), torch.from_numpy(
             np.array([y], dtype=np.float32)
-        ), weight
+        )
 
     def _load_data(self):
         """加载和预处理数据 - 按流域独立归一化"""
@@ -1520,7 +1530,7 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     
     # 训练数据集（在数据集内部按比例切分时间）
     # 传入辅助数据，确保只使用flow和waterlevel都存在的时间段
-    qualifiers_csv = "qualifiers_output/camelsh_with_qualifiers.csv"
+    qualifiers_csv = "qualifiers_output/camelsh_with_qualifiers.csv" if USE_QUALIFIER_WEIGHTS else None
     ds_train = SingleTaskDataset(
         basins=chosen_basins,
         dates=default_range,

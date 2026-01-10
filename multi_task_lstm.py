@@ -22,6 +22,11 @@ DEVICE = torch.device(
     "cuda:0" if torch.cuda.is_available() else "cpu"
 )  # check if GPU is available
 
+# 是否使用 USGS qualifiers 权重对 loss 加权
+# - True: 训练时读取 qualifiers_output/camelsh_with_qualifiers.csv，并在 loss 中应用 Q_weight/H_weight
+# - False: 不读取权重文件，等价于不加权训练
+USE_QUALIFIER_WEIGHTS = True
+
 # 时间划分比例（经验值）：按每个流域自身完整时间序列划分
 TRAIN_RATIO = 0.6
 VALID_RATIO = 0.2
@@ -140,6 +145,7 @@ class MultiTaskDataset(Dataset):
         self.data_waterlevel = data_waterlevel
         
         # 加载权重数据（如果提供）
+        self.use_qualifier_weights = bool(qualifiers_csv_path)
         self.qualifiers_weights = None
         if qualifiers_csv_path:
             self._load_qualifiers_weights(qualifiers_csv_path)
@@ -240,8 +246,11 @@ class MultiTaskDataset(Dataset):
         
         # 查询权重（如果有）
         q_weight, h_weight = self._get_sample_weights(basin, end_time)
-        
-        return torch.from_numpy(xc).float(), torch.from_numpy(y).float(), basin, (q_weight, h_weight)
+
+        if self.use_qualifier_weights:
+            return torch.from_numpy(xc).float(), torch.from_numpy(y).float(), basin, (q_weight, h_weight)
+
+        return torch.from_numpy(xc).float(), torch.from_numpy(y).float(), basin
 
     def _load_data(self):
         """从文件加载数据 - 增强NaN检查和处理"""
@@ -1452,8 +1461,8 @@ if __name__ == "__main__":
     print("属性DataFrame样本:")
     print(attrs_df.head())
     
-    # 训练数据集（加载权重）
-    qualifiers_csv = "qualifiers_output/camelsh_with_qualifiers.csv"
+    # 训练数据集（可选加载权重）
+    qualifiers_csv = "qualifiers_output/camelsh_with_qualifiers.csv" if USE_QUALIFIER_WEIGHTS else None
     ds_train = MultiTaskDataset(
         basins=chosen_basins,
         dates=default_range,
@@ -1467,7 +1476,7 @@ if __name__ == "__main__":
     )
     tr_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True)
     
-    # 验证数据集（也加载权重用于一致性，但评估时不使用）
+    # 验证数据集（可选加载权重；评估时会忽略权重）
     means = ds_train.get_means()
     stds = ds_train.get_stds()
     ds_val = MultiTaskDataset(
@@ -1486,7 +1495,7 @@ if __name__ == "__main__":
     valid_batch_size = 1000
     val_loader = DataLoader(ds_val, batch_size=valid_batch_size, shuffle=False)
     
-    # 测试数据集（也加载权重用于一致性，但评估时不使用）
+    # 测试数据集（可选加载权重；评估时会忽略权重）
     ds_test = MultiTaskDataset(
         basins=chosen_basins,
         dates=default_range,
