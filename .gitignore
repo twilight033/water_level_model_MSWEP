@@ -5,6 +5,7 @@ qualifiers_cache_per_basin_train/
 qualifiers_cache_full/
 results/reports/
 camelsh_data/
+MSWEP/
 # Model artifacts and outputs
 *.pth
 *.pt
