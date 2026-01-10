@@ -266,7 +266,7 @@ def main():
     CACHE_DIR = f"qualifiers_cache_per_basin_{TIME_PERIOD}"
     
     # 测试选项：只处理前N个流域（设为None处理全部）
-    MAX_BASINS = None  # 设置为 5 进行快速测试
+    MAX_BASINS = 2  # 设置为 5 进行快速测试
     
     print(f"  时间段: {TIME_PERIOD}")
     print(f"  输出目录: {OUTPUT_DIR}")
@@ -321,23 +321,71 @@ def main():
     print(f"\n{'='*80}")
     print("与CAMELSH数据合并")
     print(f"{'='*80}")
-    
-    # CAMELSH数据文件路径
-    CAMELSH_FLOW_FILE = "camelsh_exported/flow_hourly.csv"
-    CAMELSH_WATERLEVEL_FILE = "camelsh_exported/waterlevel_hourly.csv"
-    
-    # 检查文件是否存在
+
+    # Read CAMELSH path from project config (same source as multi_task_lstm.py)
     import os
-    if not os.path.exists(CAMELSH_FLOW_FILE):
-        print(f"\n错误: CAMELSH数据文件不存在: {CAMELSH_FLOW_FILE}")
-        print("请先运行: uv run python qualifiers_fetcher/export_camelsh_data.py")
+    try:
+        from config import CAMELSH_DATA_PATH
+    except Exception as e:
+        print(f"\n错误: 无法从项目 config.py 读取 CAMELSH_DATA_PATH - {e}")
         return
-    
-    merged_df = fetcher.merge_with_camelsh(
-        camelsh_flow_file=CAMELSH_FLOW_FILE,
-        camelsh_waterlevel_file=CAMELSH_WATERLEVEL_FILE,
+
+    if not os.path.exists(CAMELSH_DATA_PATH):
+        print(f"\n错误: CAMELSH_DATA_PATH 不存在: {CAMELSH_DATA_PATH}")
+        print("请在项目 config.py 中修正 CAMELSH_DATA_PATH 指向真实 CAMELSH 数据目录")
+        return
+
+    # Build per-basin time range mapping for slicing after loading
+    # Use timezone-aware UTC timestamps to match fetcher's UTC-normalized indices.
+    basin_time_ranges = {}
+    basins_for_merge = []
+
+    # Align with MAX_BASINS limitation (if enabled)
+    basin_time_df_for_merge = basin_time_df.head(MAX_BASINS) if MAX_BASINS else basin_time_df
+
+    for _, row in basin_time_df_for_merge.iterrows():
+        basin_id = str(row["basin_id"]).zfill(8)
+
+        if TIME_PERIOD == "train":
+            start_raw = row["train_start"]
+            end_raw = row["train_end"]
+        elif TIME_PERIOD == "valid":
+            start_raw = row["valid_start"]
+            end_raw = row["valid_end"]
+        elif TIME_PERIOD == "test":
+            start_raw = row["test_start"]
+            end_raw = row["test_end"]
+        else:  # "all"
+            start_raw = row["train_start"]
+            end_raw = row["test_end"]
+
+        start_ts = pd.to_datetime(start_raw)
+        end_ts = pd.to_datetime(end_raw)
+
+        if start_ts.tz is None:
+            start_ts = start_ts.tz_localize("UTC")
+        else:
+            start_ts = start_ts.tz_convert("UTC")
+
+        if end_ts.tz is None:
+            end_ts = end_ts.tz_localize("UTC")
+        else:
+            end_ts = end_ts.tz_convert("UTC")
+
+        basin_time_ranges[basin_id] = (start_ts, end_ts)
+        basins_for_merge.append(basin_id)
+
+    # Load a minimal global time range that covers all basins (date precision is enough for CAMELSH reader)
+    global_start = min(v[0] for v in basin_time_ranges.values()).date().isoformat()
+    global_end = max(v[1] for v in basin_time_ranges.values()).date().isoformat()
+
+    merged_df = fetcher.merge_with_camelsh_dataset(
+        camelsh_data_path=CAMELSH_DATA_PATH,
+        gauge_ids=basins_for_merge,
+        time_range=[global_start, global_end],
         qualifiers_data=qualifiers_data,
-        add_weights=True
+        add_weights=True,
+        basin_time_ranges=basin_time_ranges,
     )
     
     # ==================== 6. 输出结果 ====================
@@ -350,7 +398,8 @@ def main():
     print(f"\n合并数据统计:")
     print(f"  总记录数: {len(merged_df):,}")
     print(f"  流域数: {merged_df['gauge_id'].nunique()}")
-    print(f"  时间范围: {merged_df.index.min()} 至 {merged_df.index.max()}")
+    if 'datetime' in merged_df.columns:
+        print(f"  时间范围: {merged_df['datetime'].min()} 至 {merged_df['datetime'].max()}")
     
     # 统计qualifiers覆盖率
     if 'Q_flag' in merged_df.columns:

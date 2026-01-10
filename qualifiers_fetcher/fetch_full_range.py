@@ -209,20 +209,23 @@ def main():
     # 3. 输出配置
     OUTPUT_DIR = "qualifiers_output_full"
     CACHE_DIR = "qualifiers_cache_full"
-    
-    # 4. CAMELSH数据文件
-    CAMELSH_FLOW_FILE = "camelsh_exported/flow_hourly.csv"
-    CAMELSH_WATERLEVEL_FILE = "camelsh_exported/waterlevel_hourly.csv"
-    
-    # 检查CAMELSH数据是否存在
-    if not os.path.exists(CAMELSH_FLOW_FILE):
-        print("\n" + "!"*80)
-        print("错误: CAMELSH数据文件不存在")
-        print("!"*80)
-        print(f"找不到: {CAMELSH_FLOW_FILE}")
-        print(f"找不到: {CAMELSH_WATERLEVEL_FILE}")
-        print("\n请先运行: uv run python qualifiers_fetcher/export_camelsh_data.py")
-        print("!"*80)
+
+    # 4. CAMELSH dataset path (same source as multi_task_lstm.py)
+    try:
+        from config import CAMELSH_DATA_PATH
+    except Exception as e:
+        print("\n" + "!" * 80)
+        print("错误: 无法从项目 config.py 读取 CAMELSH_DATA_PATH")
+        print("!" * 80)
+        print(str(e))
+        return
+
+    if not os.path.exists(CAMELSH_DATA_PATH):
+        print("\n" + "!" * 80)
+        print("错误: CAMELSH_DATA_PATH 不存在")
+        print("!" * 80)
+        print(f"路径: {CAMELSH_DATA_PATH}")
+        print("请在项目 config.py 中修正 CAMELSH_DATA_PATH")
         return
     
     print(f"\n{'='*80}")
@@ -267,11 +270,12 @@ def main():
     print("与CAMELSH数据合并")
     print(f"{'='*80}")
     
-    merged_df = fetcher.merge_with_camelsh(
-        camelsh_flow_file=CAMELSH_FLOW_FILE,
-        camelsh_waterlevel_file=CAMELSH_WATERLEVEL_FILE,
+    merged_df = fetcher.merge_with_camelsh_dataset(
+        camelsh_data_path=CAMELSH_DATA_PATH,
+        gauge_ids=GAUGE_IDS,
+        time_range=[f"{START_YEAR}-01-01", f"{END_YEAR}-12-31"],
         qualifiers_data=results,
-        add_weights=True
+        add_weights=True,
     )
     
     # ==================== 输出结果 ====================
@@ -285,7 +289,8 @@ def main():
     print(f"\n合并数据统计:")
     print(f"  总记录数: {len(merged_df):,}")
     print(f"  站点数: {merged_df['gauge_id'].nunique()}")
-    print(f"  时间范围: {merged_df.index.min()} 至 {merged_df.index.max()}")
+    if 'datetime' in merged_df.columns:
+        print(f"  时间范围: {merged_df['datetime'].min()} 至 {merged_df['datetime'].max()}")
     
     # 统计qualifiers覆盖率
     if 'Q_flag' in merged_df.columns:

@@ -1,0 +1,23 @@
+径流 Q
+qualifier	权重
+A	1.00
+missing	1.00
+A,[91]	0.95
+A,[92]	0.95
+A,[93]	0.95
+A,[90]	0.95
+A,e	0.60
+P	0.90
+P,e	0.54
+A,R	1.00
+
+水位 H
+qualifier	权重
+A	1.00
+missing	1.00
+P	0.90
+A,e	0.60
+A,R	1.00
+P,Dis	0.18
+P,Eqp	0.10
+P,Ice	0.72

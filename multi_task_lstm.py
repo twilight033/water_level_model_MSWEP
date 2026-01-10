@@ -89,6 +89,7 @@ class MultiTaskDataset(Dataset):
         seq_length: int = 100,
         means: dict = None,
         stds: dict = None,
+        qualifiers_csv_path: str = None,  # 权重CSV路径（可选）
     ):
         """
         初始化多任务数据集
@@ -137,6 +138,11 @@ class MultiTaskDataset(Dataset):
         self.data_forcing = data_forcing
         self.data_flow = data_flow
         self.data_waterlevel = data_waterlevel
+        
+        # 加载权重数据（如果提供）
+        self.qualifiers_weights = None
+        if qualifiers_csv_path:
+            self._load_qualifiers_weights(qualifiers_csv_path)
 
         # 加载和预处理数据
         self._load_data()
@@ -232,7 +238,10 @@ class MultiTaskDataset(Dataset):
             print(f"  y_flow: {y_flow}, y_waterlevel: {y_waterlevel}")
             raise ValueError("目标值包含NaN")
         
-        return torch.from_numpy(xc).float(), torch.from_numpy(y).float(), basin
+        # 查询权重（如果有）
+        q_weight, h_weight = self._get_sample_weights(basin, end_time)
+        
+        return torch.from_numpy(xc).float(), torch.from_numpy(y).float(), basin, (q_weight, h_weight)
 
     def _load_data(self):
         """从文件加载数据 - 增强NaN检查和处理"""
@@ -662,6 +671,47 @@ class MultiTaskDataset(Dataset):
     def get_stds(self):
         return self.stds
 
+    def _load_qualifiers_weights(self, csv_path: str):
+        """加载qualifiers权重CSV并建立索引"""
+        import os
+        if not os.path.exists(csv_path):
+            print(f"[警告] 权重文件不存在: {csv_path}，将使用默认权重1.0")
+            return
+        
+        print(f"正在加载权重数据: {csv_path}")
+        try:
+            # 只读取需要的列
+            df = pd.read_csv(csv_path, usecols=['datetime', 'gauge_id', 'Q_weight', 'H_weight'])
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            df['gauge_id'] = df['gauge_id'].astype(str)
+            
+            # 建立 (datetime, gauge_id) -> (Q_weight, H_weight) 索引
+            self.qualifiers_weights = {}
+            for _, row in df.iterrows():
+                key = (row['datetime'], row['gauge_id'])
+                self.qualifiers_weights[key] = (float(row['Q_weight']), float(row['H_weight']))
+            
+            print(f"  成功加载 {len(self.qualifiers_weights)} 条权重记录")
+        except Exception as e:
+            print(f"[警告] 加载权重文件失败: {e}，将使用默认权重1.0")
+            self.qualifiers_weights = None
+    
+    def _get_sample_weights(self, basin: str, target_time):
+        """获取样本权重"""
+        if self.qualifiers_weights is None:
+            return 1.0, 1.0
+        
+        basin_str = str(basin)
+        # 确保 target_time 是 pandas Timestamp（带时区或不带）
+        if isinstance(target_time, pd.Timestamp):
+            lookup_time = target_time
+        else:
+            lookup_time = pd.Timestamp(target_time)
+        
+        key = (lookup_time, basin_str)
+        weights = self.qualifiers_weights.get(key, (1.0, 1.0))
+        return weights
+    
     def local_denormalization(self, feature, basin, variable="flow"):
         """按流域反归一化"""
         # 确保basin是字符串类型
@@ -751,7 +801,7 @@ class MultiTaskLSTM(nn.Module):
         return pred_flow, pred_waterlevel
 
 
-def multi_task_loss(pred_flow, pred_waterlevel, target, loss_func, task_weights):
+def multi_task_loss(pred_flow, pred_waterlevel, target, loss_func, task_weights, sample_weights=None):
     """
     多任务损失函数
 
@@ -764,17 +814,30 @@ def multi_task_loss(pred_flow, pred_waterlevel, target, loss_func, task_weights)
     target : torch.Tensor
         目标值 [batch_size, 2]，第一列是径流，第二列是水位
     loss_func : callable
-        基础损失函数（如MSELoss）
+        基础损失函数（如MSELoss，需设置reduction='none'）
     task_weights : dict
         任务权重
+    sample_weights : tuple of torch.Tensor, optional
+        (Q_weights, H_weights) 每个样本的权重
 
     Returns
     -------
     tuple
         (总损失, 径流损失, 水位损失)
     """
-    loss_flow = loss_func(pred_flow, target[:, 0:1])
-    loss_waterlevel = loss_func(pred_waterlevel, target[:, 1:2])
+    # 计算逐样本loss（不做reduction）
+    loss_flow_per_sample = F.mse_loss(pred_flow, target[:, 0:1], reduction='none')
+    loss_waterlevel_per_sample = F.mse_loss(pred_waterlevel, target[:, 1:2], reduction='none')
+    
+    # 应用样本权重
+    if sample_weights is not None:
+        q_weights, h_weights = sample_weights
+        loss_flow_per_sample = loss_flow_per_sample * q_weights.view(-1, 1)
+        loss_waterlevel_per_sample = loss_waterlevel_per_sample * h_weights.view(-1, 1)
+    
+    # 求均值
+    loss_flow = loss_flow_per_sample.mean()
+    loss_waterlevel = loss_waterlevel_per_sample.mean()
     
     total_loss = (
         task_weights['flow'] * loss_flow + 
@@ -794,7 +857,18 @@ def train_epoch(model, optimizer, loader, loss_func, epoch):
     epoch_loss_flow = 0.0
     epoch_loss_waterlevel = 0.0
     
-    for batch_idx, (xs, ys,basins) in enumerate(pbar):
+    for batch_idx, batch_data in enumerate(pbar):
+        # 解包（兼容有权重和无权重两种情况）
+        if len(batch_data) == 4:
+            xs, ys, basins, weights = batch_data
+            q_weights_list, h_weights_list = zip(*weights)
+            q_weights = torch.tensor(q_weights_list, dtype=torch.float32).to(DEVICE)
+            h_weights = torch.tensor(h_weights_list, dtype=torch.float32).to(DEVICE)
+            sample_weights = (q_weights, h_weights)
+        else:
+            xs, ys, basins = batch_data
+            sample_weights = None
+        
         # 检查输入数据
         if torch.isnan(xs).any() or torch.isnan(ys).any():
             print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 输入数据包含NaN")
@@ -815,9 +889,9 @@ def train_epoch(model, optimizer, loader, loss_func, epoch):
             print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 预测结果包含NaN")
             raise ValueError("预测结果包含NaN")
         
-        # 计算损失
+        # 计算损失（应用样本权重）
         total_loss, loss_flow, loss_waterlevel = multi_task_loss(
-            pred_flow, pred_waterlevel, ys, loss_func, model.task_weights
+            pred_flow, pred_waterlevel, ys, loss_func, model.task_weights, sample_weights
         )
         
         # 检查损失
@@ -882,7 +956,12 @@ def eval_model(model, loader):
     preds_waterlevel = {}
     
     with torch.no_grad():
-        for xs, ys, basins in loader:
+        for batch_data in loader:
+            # 解包（兼容有权重和无权重两种情况）
+            if len(batch_data) == 4:
+                xs, ys, basins, _ = batch_data  # 忽略权重
+            else:
+                xs, ys, basins = batch_data
             xs = xs.to(DEVICE)
             pred_flow, pred_waterlevel = model(xs)
             
@@ -1178,7 +1257,7 @@ if __name__ == "__main__":
     
     # 导入配置
     from config import (
-        CAMELSH_DATA_PATH, NUM_BASINS, SEQUENCE_LENGTH, BATCH_SIZE, EPOCHS,
+        CAMELSH_DATA_PATH, NUM_BASINS, SEQUENCE_LENGTH, BATCH_SIZE,
         TRAIN_START, TRAIN_END, VALID_START, VALID_END, TEST_START, TEST_END,
         FORCING_VARIABLES, ATTRIBUTE_VARIABLES,
         IMAGES_SAVE_PATH, REPORTS_SAVE_PATH, MODEL_SAVE_PATH
@@ -1288,10 +1367,10 @@ if __name__ == "__main__":
     # 从CAMELSH加载非降雨气象变量
     if chosen_forcing_vars_no_precip:
         forcings_ds_no_precip = camelsh_reader.read_ts_xrdataset(
-            gage_id_lst=chosen_basins,
-            t_range=default_range,
+        gage_id_lst=chosen_basins,
+        t_range=default_range,
             var_lst=chosen_forcing_vars_no_precip
-        )
+    )
         print(f"非降雨气象数据形状: {forcings_ds_no_precip.dims}")
         print(f"非降雨气象数据变量: {list(forcings_ds_no_precip.data_vars.keys())}")
     else:
@@ -1373,7 +1452,8 @@ if __name__ == "__main__":
     print("属性DataFrame样本:")
     print(attrs_df.head())
     
-    # 训练数据集
+    # 训练数据集（加载权重）
+    qualifiers_csv = "qualifiers_output/camelsh_with_qualifiers.csv"
     ds_train = MultiTaskDataset(
         basins=chosen_basins,
         dates=default_range,
@@ -1383,10 +1463,11 @@ if __name__ == "__main__":
         data_waterlevel=full_waterlevel,
         loader_type="train",
         seq_length=sequence_length,
+        qualifiers_csv_path=qualifiers_csv,
     )
     tr_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True)
     
-    # 验证数据集
+    # 验证数据集（也加载权重用于一致性，但评估时不使用）
     means = ds_train.get_means()
     stds = ds_train.get_stds()
     ds_val = MultiTaskDataset(
@@ -1400,11 +1481,12 @@ if __name__ == "__main__":
         seq_length=sequence_length,
         means=means,
         stds=stds,
+        qualifiers_csv_path=qualifiers_csv,
     )
     valid_batch_size = 1000
     val_loader = DataLoader(ds_val, batch_size=valid_batch_size, shuffle=False)
     
-    # 测试数据集
+    # 测试数据集（也加载权重用于一致性，但评估时不使用）
     ds_test = MultiTaskDataset(
         basins=chosen_basins,
         dates=default_range,
@@ -1416,6 +1498,7 @@ if __name__ == "__main__":
         seq_length=sequence_length,
         means=means,
         stds=stds,
+        qualifiers_csv_path=qualifiers_csv,
     )
     test_batch_size = 1000
     test_loader = DataLoader(ds_test, batch_size=test_batch_size, shuffle=False)
@@ -1443,23 +1526,13 @@ if __name__ == "__main__":
     print(f"模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     print(f"设备: {DEVICE}")
     
-    # ==================== 7. 训练模型（带早停机制）====================
+    # ==================== 7. 训练模型 ====================
     print("\n开始训练...")
-    n_epochs = EPOCHS  # 训练轮数
+    n_epochs = 10  # 训练轮数
     
     train_losses = []
     val_nses_flow = []
     val_nses_waterlevel = []
-    
-    # 早停机制相关变量
-    best_val_nse_avg = -float('inf')  # 最佳验证NSE（两个任务的平均）
-    best_epoch = 0  # 最佳epoch
-    patience = 5  # 容忍度：多少个epoch不提升就停止
-    patience_counter = 0  # 计数器
-    best_model_state = None  # 保存最佳模型状态
-    
-    print(f"早停机制已启用，patience = {patience}")
-    print("早停指标：两个任务NSE的平均值")
     
     for i in range(n_epochs):
         # 训练
@@ -1496,48 +1569,14 @@ if __name__ == "__main__":
             nse_flow_list.append(he.nse(pf, of))
             nse_waterlevel_list.append(he.nse(pw, ow))
         
-        current_nse_flow = np.mean(nse_flow_list)
-        current_nse_waterlevel = np.mean(nse_waterlevel_list)
-        current_nse_avg = (current_nse_flow + current_nse_waterlevel) / 2
+        val_nses_flow.append(np.mean(nse_flow_list))
+        val_nses_waterlevel.append(np.mean(nse_waterlevel_list))
         
-        val_nses_flow.append(current_nse_flow)
-        val_nses_waterlevel.append(current_nse_waterlevel)
-        
-        # 早停逻辑
-        if current_nse_avg > best_val_nse_avg:
-            best_val_nse_avg = current_nse_avg
-            best_epoch = i + 1
-            patience_counter = 0
-            # 保存最佳模型状态
-            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            tqdm.write(
-                f"Epoch {i+1} - "
-                f"验证集 NSE (径流): {current_nse_flow:.4f}, "
-                f"NSE (水位): {current_nse_waterlevel:.4f}, "
-                f"平均: {current_nse_avg:.4f} ✓ [新最佳]"
-            )
-        else:
-            patience_counter += 1
-            tqdm.write(
-                f"Epoch {i+1} - "
-                f"验证集 NSE (径流): {current_nse_flow:.4f}, "
-                f"NSE (水位): {current_nse_waterlevel:.4f}, "
-                f"平均: {current_nse_avg:.4f} "
-                f"(无改进 {patience_counter}/{patience})"
-            )
-            
-            # 如果超过patience，停止训练
-            if patience_counter >= patience:
-                print(f"\n早停触发！平均验证集NSE已连续 {patience} 个epoch未改进")
-                print(f"最佳模型出现在 Epoch {best_epoch}，平均NSE = {best_val_nse_avg:.4f}")
-                print("加载最佳模型...")
-                # 加载最佳模型
-                model.load_state_dict({k: v.to(DEVICE) for k, v in best_model_state.items()})
-                # 截断训练曲线到实际训练的epoch数
-                train_losses = train_losses[:i+1]
-                val_nses_flow = val_nses_flow[:i+1]
-                val_nses_waterlevel = val_nses_waterlevel[:i+1]
-                break
+        tqdm.write(
+            f"Epoch {i+1} - "
+            f"验证集 NSE (径流): {np.mean(nse_flow_list):.4f}, "
+            f"NSE (水位): {np.mean(nse_waterlevel_list):.4f}"
+        )
 
     
     # ==================== 8. 测试模型 ====================
