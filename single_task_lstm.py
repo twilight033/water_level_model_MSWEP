@@ -284,6 +284,7 @@ class SingleTaskDataset(Dataset):
         means: dict = None,
         stds: dict = None,
         data_aux: pd.DataFrame = None,  # 辅助数据（用于筛选时间段）
+        qualifiers_csv_path: str = None,  # 权重CSV路径（可选）
     ):
         """
         初始化单任务数据集
@@ -430,9 +431,12 @@ class SingleTaskDataset(Dataset):
             print(f"  目标时间: {end_time}")
             raise ValueError("目标值包含NaN")
         
+        # 查询权重（如果有）
+        weight = self._get_sample_weight(basin, end_time)
+        
         return torch.from_numpy(xc).float(), torch.from_numpy(
             np.array([y], dtype=np.float32)
-        )
+        ), weight
 
     def _load_data(self):
         """加载和预处理数据 - 按流域独立归一化"""
@@ -874,6 +878,92 @@ class SingleTaskDataset(Dataset):
     def get_stds(self):
         return self.stds
 
+    def _load_qualifiers_weights(self, csv_path: str):
+        """加载qualifiers权重CSV并建立索引"""
+        import os
+        if not os.path.exists(csv_path):
+            print(f"[警告] 权重文件不存在: {csv_path}，将使用默认权重1.0")
+            return
+        
+        print(f"正在加载权重数据: {csv_path}")
+        try:
+            # 只读取需要的列
+            df = pd.read_csv(csv_path, usecols=['datetime', 'gauge_id', 'Q_weight', 'H_weight'])
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            df['gauge_id'] = df['gauge_id'].astype(str)
+            
+            # 建立 (datetime, gauge_id) -> weight 索引
+            # 根据 target_type 选择对应权重列
+            weight_col = 'Q_weight' if self.target_type == 'flow' else 'H_weight'
+            self.qualifiers_weights = {}
+            for _, row in df.iterrows():
+                key = (row['datetime'], row['gauge_id'])
+                self.qualifiers_weights[key] = float(row[weight_col])
+            
+            print(f"  成功加载 {len(self.qualifiers_weights)} 条权重记录 (目标: {self.target_type})")
+        except Exception as e:
+            print(f"[警告] 加载权重文件失败: {e}，将使用默认权重1.0")
+            self.qualifiers_weights = None
+    
+    def _get_sample_weight(self, basin: str, target_time):
+        """获取样本权重"""
+        if self.qualifiers_weights is None:
+            return 1.0
+        
+        basin_str = str(basin)
+        # 确保 target_time 是 pandas Timestamp
+        if isinstance(target_time, pd.Timestamp):
+            lookup_time = target_time
+        else:
+            lookup_time = pd.Timestamp(target_time)
+        
+        key = (lookup_time, basin_str)
+        weight = self.qualifiers_weights.get(key, 1.0)
+        return weight
+    
+    def _load_qualifiers_weights(self, csv_path: str):
+        """加载qualifiers权重CSV并建立索引"""
+        import os
+        if not os.path.exists(csv_path):
+            print(f"[警告] 权重文件不存在: {csv_path}，将使用默认权重1.0")
+            return
+        
+        print(f"正在加载权重数据: {csv_path}")
+        try:
+            # 只读取需要的列
+            df = pd.read_csv(csv_path, usecols=['datetime', 'gauge_id', 'Q_weight', 'H_weight'])
+            df['datetime'] = pd.to_datetime(df['datetime'])
+            df['gauge_id'] = df['gauge_id'].astype(str)
+            
+            # 建立 (datetime, gauge_id) -> weight 索引
+            # 根据 target_type 选择对应权重列
+            weight_col = 'Q_weight' if self.target_type == 'flow' else 'H_weight'
+            self.qualifiers_weights = {}
+            for _, row in df.iterrows():
+                key = (row['datetime'], row['gauge_id'])
+                self.qualifiers_weights[key] = float(row[weight_col])
+            
+            print(f"  成功加载 {len(self.qualifiers_weights)} 条权重记录 (目标: {self.target_type})")
+        except Exception as e:
+            print(f"[警告] 加载权重文件失败: {e}，将使用默认权重1.0")
+            self.qualifiers_weights = None
+    
+    def _get_sample_weight(self, basin: str, target_time):
+        """获取样本权重"""
+        if self.qualifiers_weights is None:
+            return 1.0
+        
+        basin_str = str(basin)
+        # 确保 target_time 是 pandas Timestamp
+        if isinstance(target_time, pd.Timestamp):
+            lookup_time = target_time
+        else:
+            lookup_time = pd.Timestamp(target_time)
+        
+        key = (lookup_time, basin_str)
+        weight = self.qualifiers_weights.get(key, 1.0)
+        return weight
+
     def local_denormalization(self, feature, basin):
         """按流域反归一化"""
         # 确保basin是字符串类型
@@ -961,7 +1051,15 @@ def train_epoch(model, optimizer, loader, loss_func, epoch, target_type):
     
     epoch_loss = 0.0
     
-    for batch_idx, (xs, ys) in enumerate(pbar):
+    for batch_idx, batch_data in enumerate(pbar):
+        # 解包（兼容有权重和无权重两种情况）
+        if len(batch_data) == 3:
+            xs, ys, weights = batch_data
+            weights_tensor = torch.tensor(weights, dtype=torch.float32).to(DEVICE)
+        else:
+            xs, ys = batch_data
+            weights_tensor = None
+        
         # 检查输入数据
         if torch.isnan(xs).any() or torch.isnan(ys).any():
             print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 输入数据包含NaN")
@@ -982,8 +1080,11 @@ def train_epoch(model, optimizer, loader, loss_func, epoch, target_type):
             print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 预测结果包含NaN")
             raise ValueError("预测结果包含NaN")
         
-        # 计算损失
-        loss = loss_func(pred, ys)
+        # 计算损失（应用样本权重）
+        loss_per_sample = F.mse_loss(pred, ys, reduction='none')
+        if weights_tensor is not None:
+            loss_per_sample = loss_per_sample * weights_tensor.view(-1, 1)
+        loss = loss_per_sample.mean()
         
         # 检查损失
         if torch.isnan(loss):
@@ -1025,7 +1126,13 @@ def eval_model(model, loader, target_type):
     sample_offset = 0
     
     with torch.no_grad():
-        for xs, ys in tqdm(loader, desc="评估中"):
+        for batch_data in tqdm(loader, desc="评估中"):
+            # 解包（兼容有权重和无权重两种情况）
+            if len(batch_data) == 3:
+                xs, ys, _ = batch_data  # 忽略权重
+            else:
+                xs, ys = batch_data
+            
             batch_size = xs.size(0)
             xs = xs.to(DEVICE)
             pred = model(xs)
@@ -1408,6 +1515,7 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     
     # 训练数据集（在数据集内部按比例切分时间）
     # 传入辅助数据，确保只使用flow和waterlevel都存在的时间段
+    qualifiers_csv = "qualifiers_output/camelsh_with_qualifiers.csv"
     ds_train = SingleTaskDataset(
         basins=chosen_basins,
         dates=default_range,
@@ -1418,6 +1526,7 @@ def train_single_task_model(target_type="flow", num_epochs=None):
         loader_type="train",
         seq_length=sequence_length,
         data_aux=full_aux,  # 辅助数据，用于筛选时间段
+        qualifiers_csv_path=qualifiers_csv,
     )
     tr_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True)
     
@@ -1436,6 +1545,7 @@ def train_single_task_model(target_type="flow", num_epochs=None):
         means=means,
         stds=stds,
         data_aux=full_aux,  # 辅助数据，用于筛选时间段
+        qualifiers_csv_path=qualifiers_csv,
     )
     valid_batch_size = 1000
     val_loader = DataLoader(ds_val, batch_size=valid_batch_size, shuffle=False)
@@ -1453,6 +1563,7 @@ def train_single_task_model(target_type="flow", num_epochs=None):
         means=means,
         stds=stds,
         data_aux=full_aux,  # 辅助数据，用于筛选时间段
+        qualifiers_csv_path=qualifiers_csv,
     )
     test_batch_size = 1000
     test_loader = DataLoader(ds_test, batch_size=test_batch_size, shuffle=False)
@@ -1470,30 +1581,18 @@ def train_single_task_model(target_type="flow", num_epochs=None):
         dropout_rate=dropout_rate
     ).to(DEVICE)
     
-    # 使用权重衰减（L2正则化）
-    weight_decay = 1e-5
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     loss_func = nn.MSELoss()
     
     print(f"模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     print(f"设备: {DEVICE}")
-    print(f"权重衰减: {weight_decay}")
     
-    # ==================== 7. 训练模型（带早停机制）====================
+    # ==================== 7. 训练模型 ====================
     print("\n开始训练...")
     n_epochs = num_epochs
     
     train_losses = []
     val_nses = []
-    
-    # 早停机制相关变量
-    best_val_nse = -float('inf')  # 最佳验证NSE
-    best_epoch = 0  # 最佳epoch
-    patience = 5  # 容忍度：多少个epoch不提升就停止
-    patience_counter = 0  # 计数器
-    best_model_state = None  # 保存最佳模型状态
-    
-    print(f"早停机制已启用，patience = {patience}")
     
     for i in range(n_epochs):
         # 训练
@@ -1526,41 +1625,13 @@ def train_single_task_model(target_type="flow", num_epochs=None):
             # 计算每个流域的 NSE
             nse_list.append(he.nse(pf, of))
         
-        current_val_nse = np.mean(nse_list)
-        val_nses.append(current_val_nse)
+        val_nses.append(np.mean(nse_list))
         
-        # 早停逻辑
-        if current_val_nse > best_val_nse:
-            best_val_nse = current_val_nse
-            best_epoch = i + 1
-            patience_counter = 0
-            # 保存最佳模型状态
-            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            tqdm.write(
-                f"Epoch {i+1} - "
-                f"训练损失: {train_loss:.6f}, "
-                f"验证集 NSE: {current_val_nse:.4f} ✓ [新最佳]"
-            )
-        else:
-            patience_counter += 1
-            tqdm.write(
-                f"Epoch {i+1} - "
-                f"训练损失: {train_loss:.6f}, "
-                f"验证集 NSE: {current_val_nse:.4f} "
-                f"(无改进 {patience_counter}/{patience})"
-            )
-            
-            # 如果超过patience，停止训练
-            if patience_counter >= patience:
-                print(f"\n早停触发！验证集NSE已连续 {patience} 个epoch未改进")
-                print(f"最佳模型出现在 Epoch {best_epoch}，NSE = {best_val_nse:.4f}")
-                print("加载最佳模型...")
-                # 加载最佳模型
-                model.load_state_dict({k: v.to(DEVICE) for k, v in best_model_state.items()})
-                # 截断训练曲线到实际训练的epoch数
-                train_losses = train_losses[:i+1]
-                val_nses = val_nses[:i+1]
-                break
+        tqdm.write(
+            f"Epoch {i+1} - "
+            f"训练损失: {train_loss:.6f}, "
+            f"验证集 NSE: {np.mean(nse_list):.4f}"
+        )
 
     
     # ==================== 8. 测试模型 ====================

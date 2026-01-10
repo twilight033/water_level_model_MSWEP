@@ -80,16 +80,7 @@ CAMELSH_WATERLEVEL_FILE = "camelsh_exported/waterlevel_hourly.csv"
 # CAMELSH_WATERLEVEL_FILE = "../path/to/your/waterlevel_data.csv"
 
 # CAMELSH数据集路径（用于export_camelsh_data.py）
-# 从项目主config.py读取，或在这里指定
-try:
-    import sys
-    sys.path.append('..')
-    from config import CAMELSH_DATA_PATH
-    print(f"使用项目配置的CAMELSH路径: {CAMELSH_DATA_PATH}")
-except ImportError:
-    # 如果无法从主配置读取，使用默认值
-    CAMELSH_DATA_PATH = "../camelsh_data/CAMELSH"
-    print(f"使用默认CAMELSH路径: {CAMELSH_DATA_PATH}")
+CAMELSH_DATA_PATH = "F:/data"
 
 
 # ==================== 输出配置 ====================

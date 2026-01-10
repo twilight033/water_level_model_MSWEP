@@ -19,7 +19,8 @@ import ast
 
 def load_basin_ids():
     """从valid_waterlevel_basins.txt加载流域ID"""
-    basin_file = "../valid_waterlevel_basins.txt"
+    # Always resolve relative to project root to avoid CWD-dependent failures.
+    basin_file = project_root / "valid_waterlevel_basins.txt"
     
     if not os.path.exists(basin_file):
         print(f"错误: 找不到文件 {basin_file}")
@@ -74,7 +75,7 @@ def main():
     print("\nStep 2: 选择要处理的流域...")
     
     # 选项1: 处理前N个流域（测试用）
-    N_BASINS = 10  # 先测试10个流域
+    N_BASINS = 120  # 先测试10个流域
     selected_basins = basin_ids[:N_BASINS]
     
     # 选项2: 处理所有流域（生产用）
@@ -83,28 +84,25 @@ def main():
     print(f"  选择了 {len(selected_basins)} 个流域进行处理")
     print(f"  站点: {selected_basins}")
     
-    # ==================== Step 3: 导出CAMELSH数据 ====================
+    # ==================== Step 3: 检查CAMELSH数据路径 ====================
     
     print("\nStep 3: 检查CAMELSH数据...")
     
-    # 检查是否已经导出
-    camelsh_exported_dir = "camelsh_exported"
-    flow_file = os.path.join(camelsh_exported_dir, "flow_hourly.csv")
-    wl_file = os.path.join(camelsh_exported_dir, "waterlevel_hourly.csv")
-    
-    if not os.path.exists(flow_file) or not os.path.exists(wl_file):
-        print("  CAMELSH数据文件不存在，需要先导出...")
-        print("  运行: uv run python export_camelsh_data.py")
-        print("  或手动准备CSV文件")
-        
-        # 询问用户是否继续
-        response = input("\n  是否继续？(输入'y'继续，其他键退出): ")
-        if response.lower() != 'y':
-            print("  用户取消")
-            return
-    else:
-        print(f"  找到径流数据: {flow_file}")
-        print(f"  找到水位数据: {wl_file}")
+    # Read CAMELSH path from project config (same source as multi_task_lstm.py)
+    try:
+        from config import CAMELSH_DATA_PATH
+    except Exception as e:
+        print(f"错误: 无法从项目 config.py 读取 CAMELSH_DATA_PATH - {e}")
+        print("请检查项目根目录的 config.py 是否存在并包含 CAMELSH_DATA_PATH")
+        return
+
+    if not os.path.exists(CAMELSH_DATA_PATH):
+        print("错误: CAMELSH_DATA_PATH 不存在:")
+        print(f"  {CAMELSH_DATA_PATH}")
+        print("请在项目 config.py 中修正 CAMELSH_DATA_PATH 指向真实 CAMELSH 数据目录")
+        return
+
+    print(f"  使用CAMELSH_DATA_PATH: {CAMELSH_DATA_PATH}")
     
     # ==================== Step 4: 获取qualifiers ====================
     
@@ -127,29 +125,26 @@ def main():
     
     print("\nStep 5: 与CAMELSH数据合并...")
     
-    if os.path.exists(flow_file) and os.path.exists(wl_file):
-        merged_df = fetcher.merge_with_camelsh(
-            camelsh_flow_file=flow_file,
-            camelsh_waterlevel_file=wl_file,
-            qualifiers_data=qualifiers_data,
-            output_file=None,
-            add_weights=True
-        )
-        
-        print("\n" + "=" * 80)
-        print("完成!")
-        print("=" * 80)
-        print(f"\n输出文件:")
-        print(f"  - 合并数据: qualifiers_output/camelsh_with_qualifiers.csv")
-        print(f"  - 统计报告: qualifiers_output/qualifiers_report.txt")
-        print(f"  - 缓存目录: qualifiers_cache/")
-        
-        # 显示数据预览
-        print(f"\n数据预览（前5行）:")
-        print(merged_df.head())
-        
-    else:
-        print("\n警告: CAMELSH数据文件不存在，只保存了qualifiers数据到缓存")
+    merged_df = fetcher.merge_with_camelsh_dataset(
+        camelsh_data_path=CAMELSH_DATA_PATH,
+        gauge_ids=selected_basins,
+        time_range=[START_DATE, END_DATE],
+        qualifiers_data=qualifiers_data,
+        output_file=None,
+        add_weights=True,
+    )
+
+    print("\n" + "=" * 80)
+    print("完成!")
+    print("=" * 80)
+    print(f"\n输出文件:")
+    print(f"  - 合并数据: qualifiers_output/camelsh_with_qualifiers.csv")
+    print(f"  - 统计报告: qualifiers_output/qualifiers_report.txt")
+    print(f"  - 缓存目录: qualifiers_cache/")
+
+    # 显示数据预览
+    print(f"\n数据预览（前5行）:")
+    print(merged_df.head())
     
     # ==================== Step 6: 下一步建议 ====================
     
