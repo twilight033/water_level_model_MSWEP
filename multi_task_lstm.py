@@ -870,9 +870,24 @@ def train_epoch(model, optimizer, loader, loss_func, epoch):
         # 解包（兼容有权重和无权重两种情况）
         if len(batch_data) == 4:
             xs, ys, basins, weights = batch_data
-            q_weights_list, h_weights_list = zip(*weights)
-            q_weights = torch.tensor(q_weights_list, dtype=torch.float32).to(DEVICE)
-            h_weights = torch.tensor(h_weights_list, dtype=torch.float32).to(DEVICE)
+            # DataLoader 默认 collate 可能将 (q_weight, h_weight) 聚合为：
+            # - (q_tensor, h_tensor)  或
+            # - tensor(shape=[batch, 2]) 或
+            # - list of tuple[(q,h), ...]
+            if isinstance(weights, (tuple, list)) and len(weights) == 2 and torch.is_tensor(weights[0]) and torch.is_tensor(weights[1]):
+                q_weights = weights[0].to(DEVICE).float()
+                h_weights = weights[1].to(DEVICE).float()
+            elif torch.is_tensor(weights):
+                w = weights.to(DEVICE).float()
+                if w.ndim == 2 and w.shape[1] == 2:
+                    q_weights = w[:, 0]
+                    h_weights = w[:, 1]
+                else:
+                    raise ValueError(f"Unexpected weights tensor shape: {tuple(w.shape)}")
+            else:
+                q_weights_list, h_weights_list = zip(*weights)
+                q_weights = torch.tensor(q_weights_list, dtype=torch.float32).to(DEVICE)
+                h_weights = torch.tensor(h_weights_list, dtype=torch.float32).to(DEVICE)
             sample_weights = (q_weights, h_weights)
         else:
             xs, ys, basins = batch_data
