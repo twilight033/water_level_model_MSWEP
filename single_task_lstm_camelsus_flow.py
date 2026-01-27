@@ -1101,6 +1101,23 @@ def train_epoch(model, optimizer, loader, loss_func, epoch, target_type):
     return avg_loss
 
 
+def validate_epoch(model, loader, loss_func):
+    """验证一个epoch，返回平均损失"""
+    model.eval()
+    total_loss = 0.0
+    num_batches = 0
+    
+    with torch.no_grad():
+        for xs, ys in loader:
+            xs, ys = xs.to(DEVICE), ys.to(DEVICE)
+            pred = model(xs)
+            loss = loss_func(pred, ys)
+            total_loss += loss.item()
+            num_batches += 1
+    
+    return total_loss / num_batches if num_batches > 0 else 0.0
+
+
 def eval_model(model, loader, target_type):
     """评估模型：按流域分组返回观测和预测结果（按时间排序）"""
     model.eval()
@@ -1485,7 +1502,7 @@ def train_camelsus_flow(num_epochs=None):
     train_losses, val_losses = [], []
     for epoch in range(1, num_epochs + 1):
         tr_loss = train_epoch(model, optimizer, train_loader, loss_func, epoch, target_type="flow")
-        val_loss = eval_epoch(model, valid_loader, loss_func, epoch, target_type="flow")
+        val_loss = validate_epoch(model, valid_loader, loss_func)
         train_losses.append(tr_loss)
         val_losses.append(val_loss)
 
