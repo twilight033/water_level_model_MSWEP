@@ -1,0 +1,36 @@
+Forcing dataset diagnostics:
+Dimensions: {'basin': 500, 'time': 12784}
+Variables: ['precipitation', 'temperature_max', 'temperature_min', 'solar_radiation']
+Basins: 500
+Timesteps: 12784
+Time range: 1980-01-01T00:00:00.000000000 to 2014-12-31T00:00:00.000000000
+
+First basin 01013500:
+Shape: (12784, 3)
+NaN count: 0 / 38352 (0.0%)
+Data range: [-30.02, 717.29]
+
+Per-variable NaN counts:
+  precipitation: 0/12784 (0.0%)
+  solar_radiation: 0/12784 (0.0%)
+  temperature_mean: 0/12784 (0.0%)
+
+First basin 01013500:
+Shape: (12784, 3)
+NaN count: 0 / 38352 (0.0%)
+Data range: [-30.02, 717.29]
+
+Per-variable NaN counts:
+  precipitation: 0/12784 (0.0%)
+  solar_radiation: 0/12784 (0.0%)
+  temperature_mean: 0/12784 (0.0%)
+
+First basin 01013500:
+Shape: (12784, 3)
+NaN count: 0 / 38352 (0.0%)
+Data range: [-30.02, 717.29]
+
+Per-variable NaN counts:
+  precipitation: 0/12784 (0.0%)
+  solar_radiation: 0/12784 (0.0%)
+  temperature_mean: 0/12784 (0.0%)

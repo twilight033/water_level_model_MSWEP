@@ -7,8 +7,8 @@ CAMELSH数据集配置文件
 # ==================== CAMELSH数据路径配置 ====================
 # 修改为您的实际CAMELSH数据路径
 # 支持相对路径和绝对路径
-CAMELSH_DATA_PATH = "D:/data"
-
+CAMELSH_DATA_PATH = "F:/data"
+CAMELSUS_DATA_PATH = "D:/download/camels/camels_us"
 # 注意：确保路径下有CAMELSH目录，包含以下结构：
 # F:/data/CAMELSH/
 # ├── attributes/
@@ -23,7 +23,7 @@ CAMELSH_DATA_PATH = "D:/data"
 
 # ==================== 模型训练配置 ====================
 # 流域数量（用于测试）
-NUM_BASINS = 100
+NUM_BASINS = 500
 
 # 可用流域列表（经过验证有完整数据文件的流域）
 AVAILABLE_BASINS = [
@@ -76,12 +76,12 @@ TEST_END = "2024-12-31"
 FORCING_VARIABLES = [
     "precipitation",
     "temperature_mean", 
-    "solar_radiation",
-    "potential_evapotranspiration"
+    "solar_radiation"
+    #"potential_evapotranspiration"
 ]
 
 # 流域属性变量（CAMELSH数据集中确实可用的变量）
-ATTRIBUTE_VARIABLES = [
+ATTRIBUTE_VARIABLES0 = [
     "area",
     "p_mean",
     "p_seasonality", 
@@ -99,6 +99,7 @@ ATTRIBUTE_VARIABLES = [
     # aridity_index 不是标准变量名，已移除
     # 如需添加更多变量，请先通过测试确认其可用性
 ]
+ATTRIBUTE_VARIABLES = ["area", "slope_mean","gauge_lat","gauge_lon","elev_mean","geol_1st_class","geol_2nd_class","geol_porostiy","geol_permeability","frac_forest","lai_max","lai_diff","dom_land_cover_frac","dom_land_cover","root_depth_50","root_depth_99","soil_depth_statsgo","soil_porosity","soil_conductivity","max_water_content","pet_mean"]
 
 # ==================== 输出配置 ====================
 # 模型保存路径

@@ -1,0 +1,2 @@
+basin_id,flow_start,flow_end,flow_count,waterlevel_start,waterlevel_end,waterlevel_count,common_start,common_end,common_days,both_valid_count,start_year,end_year,years,years_bin
+01646500,2001-01-01,2024-12-31,206710,2007-10-01,2024-12-31,149438,2007-10-01,2024-12-31,6301,148610,2007,2024,17.251197809719372,10-20年

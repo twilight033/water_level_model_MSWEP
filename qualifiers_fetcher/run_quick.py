@@ -76,8 +76,8 @@ def main():
     
     # 选项1: 处理前N个流域（测试用）
     N_BASINS = 120  # 先测试10个流域
-    selected_basins = basin_ids[:N_BASINS]
-    
+    #selected_basins = basin_ids[:N_BASINS]
+    selected_basins = basin_ids[1000:1003]
     # 选项2: 处理所有流域（生产用）
     # selected_basins = basin_ids
     

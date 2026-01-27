@@ -6,12 +6,13 @@ qualifiers_cache_full/
 results/reports/
 camelsh_data/
 MSWEP/
+qualifiers_output/
 # Model artifacts and outputs
 *.pth
 *.pt
 *.png
 *.pdf
-
+*.tmp
 # Python cache
 __pycache__/
 *.py[cod]
