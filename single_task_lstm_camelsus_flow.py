@@ -1522,10 +1522,22 @@ def train_camelsus_flow(num_epochs=None):
     # ==================== 8. 测试评估 ====================
     ckpt = torch.load(best_path, map_location=DEVICE)
     model.load_state_dict(ckpt['model'])
+    means = ckpt.get('means', {})
+    stds = ckpt.get('stds', {})
 
-    # 这里沿用你原来的 eval_model / 画图 / 指标输出逻辑（如果你后面代码里有）
-    results = eval_model(model, test_loader, target_type="flow")
-    return results, best_path
+    # 测试集评估并计算 NSE
+    obs_by_basin, preds_by_basin = eval_model(model, test_loader, target_type="flow")
+    
+    # 全样本 NSE: 1 - sum((obs-pred)^2) / sum((obs-mean_obs)^2)
+    all_obs = np.concatenate([obs_by_basin[b] for b in obs_by_basin])
+    all_pred = np.concatenate([preds_by_basin[b] for b in preds_by_basin])
+    obs_mean = np.nanmean(all_obs)
+    ss_res = np.nansum((all_obs - all_pred) ** 2)
+    ss_tot = np.nansum((all_obs - obs_mean) ** 2)
+    flow_nse = float(1.0 - ss_res / ss_tot) if ss_tot > 1e-10 else 0.0
+    print(f"\n测试集整体 NSE: {flow_nse:.4f}")
+
+    return model, means, stds, flow_nse
 
 
 # 兼容旧入口：你可以继续在命令行里跑 python xxx.py
