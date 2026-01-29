@@ -1180,6 +1180,32 @@ def eval_model(model, loader, target_type):
     return sorted_obs_by_basin, sorted_preds_by_basin
 
 
+def compute_nse_per_basin(obs_by_basin: dict, preds_by_basin: dict) -> dict:
+    """按流域计算 NSE，返回 {basin_id: nse}"""
+    nse_per_basin = {}
+    for basin_id, obs in obs_by_basin.items():
+        if basin_id not in preds_by_basin:
+            continue
+        pred = preds_by_basin[basin_id]
+        obs = np.asarray(obs, dtype=float)
+        pred = np.asarray(pred, dtype=float)
+
+        # 掩码：同时非 NaN
+        mask = ~np.isnan(obs) & ~np.isnan(pred)
+        if mask.sum() < 2:
+            nse_per_basin[basin_id] = np.nan
+            continue
+
+        o = obs[mask]
+        p = pred[mask]
+        o_mean = np.nanmean(o)
+        ss_res = np.nansum((o - p) ** 2)
+        ss_tot = np.nansum((o - o_mean) ** 2)
+        nse_per_basin[basin_id] = float(1.0 - ss_res / ss_tot) if ss_tot > 1e-10 else np.nan
+
+    return nse_per_basin
+
+
 def _target_label(target_type: str) -> str:
     return "径流" if target_type == "flow" else "水位"
 
@@ -1536,6 +1562,24 @@ def train_camelsus_flow(num_epochs=None):
     ss_tot = np.nansum((all_obs - obs_mean) ** 2)
     flow_nse = float(1.0 - ss_res / ss_tot) if ss_tot > 1e-10 else 0.0
     print(f"\n测试集整体 NSE: {flow_nse:.4f}")
+
+    # 按流域计算 NSE 并输出到文件
+    nse_per_basin = compute_nse_per_basin(obs_by_basin, preds_by_basin)
+    nse_items = sorted(nse_per_basin.items(), key=lambda x: (np.isnan(x[1]), -x[1] if not np.isnan(x[1]) else 0.0))
+
+    nse_df = pd.DataFrame(
+        {"basin_id": [b for b, _ in nse_items], "nse": [v for _, v in nse_items]}
+    )
+    nse_report_path = os.path.join(REPORTS_SAVE_PATH, "camelsus_flow_test_nse_per_basin.csv")
+    nse_df.to_csv(nse_report_path, index=False, float_format="%.6f")
+    print(f"测试集按流域 NSE 已保存到: {nse_report_path}")
+
+    # 控制台打印前若干个流域的 NSE 作为预览
+    preview_cnt = min(10, len(nse_items))
+    if preview_cnt > 0:
+        print("\n测试集按流域 NSE（前 10 个，按 NSE 降序）：")
+        for basin_id, nse_val in nse_items[:preview_cnt]:
+            print(f"  流域 {basin_id}: NSE = {nse_val:.4f}" if not np.isnan(nse_val) else f"  流域 {basin_id}: NSE = NaN")
 
     return model, means, stds, flow_nse
 
