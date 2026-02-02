@@ -1291,6 +1291,7 @@ def train_camelsus_flow(num_epochs=None):
         FORCING_VARIABLES,
         ATTRIBUTE_VARIABLES,
         NUM_BASINS,
+        AVAILABLE_BASINS,
         SEQUENCE_LENGTH,
         BATCH_SIZE,
         EPOCHS,
@@ -1365,7 +1366,16 @@ def train_camelsus_flow(num_epochs=None):
     print(f"将按比例划分时间序列: 训练 {TRAIN_RATIO:.0%}, 验证 {VALID_RATIO:.0%}, 测试 {TEST_RATIO:.0%}")
 
     # 选择候选流域（这里不再做 waterlevel 相关筛选，只做 flow 有效性验证）
-    candidate_basins = basin_ids
+    # 如果 config.AVAILABLE_BASINS 非空，则优先使用其中指定的流域
+    if AVAILABLE_BASINS:
+        available_set = {str(b) for b in AVAILABLE_BASINS}
+        candidate_basins = [b for b in basin_ids if b in available_set]
+        print(f"根据 config.AVAILABLE_BASINS 限制候选流域，共 {len(candidate_basins)} 个")
+        if len(candidate_basins) == 0:
+            print("警告: AVAILABLE_BASINS 与 CAMELS-US 流域列表没有交集，将退回使用全部流域。")
+            candidate_basins = basin_ids
+    else:
+        candidate_basins = basin_ids
     max_candidates = min(len(candidate_basins), max(num_basins * 3, 200))
     print(f"将检查前 {max_candidates} 个候选流域，过滤出有有效 flow 观测的流域...")
 
