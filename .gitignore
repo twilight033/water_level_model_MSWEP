@@ -25,3 +25,6 @@ uv.lock
 # OS files
 .DS_Store
 Thumbs.db
+
+config.py
+86basin_ids.txt

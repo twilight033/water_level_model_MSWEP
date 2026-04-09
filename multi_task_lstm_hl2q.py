@@ -1228,7 +1228,7 @@ if __name__ == "__main__":
     
     # 从文件读取有水位数据的流域列表
     print("\n正在从文件读取有水位数据的流域列表...")
-    VALID_WATER_LEVEL_BASINS = load_waterlevel_basins_from_file("valid_waterlevel_basins.txt")
+    VALID_WATER_LEVEL_BASINS = load_waterlevel_basins_from_file("86basin_ids.txt")
     
     # ==================== 1. 加载CAMELSH数据 ====================
     print("\n正在加载CAMELSH数据...")

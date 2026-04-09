@@ -1235,7 +1235,7 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     candidate_basins = None
     try:
         print("\n正在从文件读取有目标数据的流域列表...")
-        candidate_basins = load_waterlevel_basins_from_file("valid_waterlevel_basins.txt")
+        candidate_basins = load_waterlevel_basins_from_file("86basin_ids.txt")
         print(f"从文件读取了 {len(candidate_basins)} 个候选流域")
     except (FileNotFoundError, ValueError) as e:
         print(f"无法从文件读取流域列表: {e}")
