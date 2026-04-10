@@ -1146,7 +1146,7 @@ if __name__ == "__main__":
     
     # 加载流域列表
     print("\n正在从文件读取流域列表...")
-    VALID_WATER_LEVEL_BASINS = load_waterlevel_basins_from_file("valid_waterlevel_basins.txt")
+    VALID_WATER_LEVEL_BASINS = load_waterlevel_basins_from_file("86basin_ids.txt")
     
     # 加载CAMELSH数据
     print("\n正在加载CAMELSH数据...")
@@ -1273,13 +1273,19 @@ if __name__ == "__main__":
         
         # 场景1：只有径流标签缺失，水位完整
         (0.1, 0.0, "flow_missing_10pct_wl_complete"),
+        (0.2, 0.0, "flow_missing_20pct_wl_complete"),
         (0.3, 0.0, "flow_missing_30pct_wl_complete"),
+        (0.4, 0.0, "flow_missing_40pct_wl_complete"),
         (0.5, 0.0, "flow_missing_50pct_wl_complete"),
+        (0.7, 0.0, "flow_missing_70pct_wl_complete"),
         
         # 场景2：只有水位标签缺失，径流完整
         (0.0, 0.1, "flow_complete_wl_missing_10pct"),
+        (0.0, 0.2, "flow_complete_wl_missing_20pct"),
         (0.0, 0.3, "flow_complete_wl_missing_30pct"),
+        (0.0, 0.4, "flow_complete_wl_missing_40pct"),
         (0.0, 0.5, "flow_complete_wl_missing_50pct"),
+        (0.0, 0.7, "flow_complete_wl_missing_50pct"),
         
         # 场景3（可选）：两个任务同时缺失（作为对比）
         (0.3, 0.3, "both_missing_30pct"),

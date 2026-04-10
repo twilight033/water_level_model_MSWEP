@@ -1703,5 +1703,5 @@ if __name__ == "__main__":
     #waterlevel_model, wl_means, wl_stds, wl_nse = train_single_task_model("waterlevel")
     
     print(f"\n=== 单任务模型训练完成 ===")
-    print(f"流量模型NSE: {flow_nse:.4f}")
-    #print(f"水位模型NSE: {wl_nse:.4f}")
+    #print(f"流量模型NSE: {flow_nse:.4f}")
+    print(f"水位模型NSE: {wl_nse:.4f}")

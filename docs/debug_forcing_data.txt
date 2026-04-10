@@ -1,7 +1,7 @@
 Forcing dataset diagnostics:
-Dimensions: {'basin': 500, 'time': 12784}
+Dimensions: {'basin': 193, 'time': 12784}
 Variables: ['precipitation', 'temperature_max', 'temperature_min', 'solar_radiation']
-Basins: 500
+Basins: 193
 Timesteps: 12784
 Time range: 1980-01-01T00:00:00.000000000 to 2014-12-31T00:00:00.000000000
 
