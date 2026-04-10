@@ -1049,7 +1049,7 @@ def aggregate_repeat_results(seed_results_list):
     best_epochs = [r['best_epoch'] for r in seed_results_list]
 
     return {
-        'experiment_name': seed_results_list[0]['experiment_name'],
+        'experiment_name': seed_results_list[0]['experiment_name'].rsplit('_seed', 1)[0],
         'flow_missing_ratio': seed_results_list[0]['flow_missing_ratio'],
         'waterlevel_missing_ratio': seed_results_list[0]['waterlevel_missing_ratio'],
         'n_repeats': len(seed_results_list),
