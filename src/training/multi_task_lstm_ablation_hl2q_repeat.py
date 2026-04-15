@@ -195,8 +195,10 @@ class MultiTaskDatasetWithMissingLabels(Dataset):
         c = np.tile(c, (seq_length, 1))
         xc = np.concatenate((x, c), axis=1)
 
+        # MSWEP t时刻值代表t→t+3h的累计降雨（向前约定），
+        # 目标后移一步至 t₀+L*3h，消除数据泄露。
         target_time_idx = time_idx
-        end_time = target_time_idx + pd.Timedelta(hours=(seq_length - 1) * 3)
+        end_time = target_time_idx + pd.Timedelta(hours=seq_length * 3)
 
         if end_time in self.data_flow.index:
             target_end_pos = self.data_flow.index.get_loc(end_time)
@@ -444,7 +446,8 @@ class MultiTaskDatasetWithMissingLabels(Dataset):
 
             valid_forcing_times = []
             for ft in forcing_times:
-                end_time = ft + pd.Timedelta(hours=(seq_length - 1) * 3)
+                # 目标时刻后移一步：t₀ + L*3h（消除MSWEP向前累计约定导致的数据泄露）
+                end_time = ft + pd.Timedelta(hours=seq_length * 3)
                 if end_time in valid_target_times:
                     valid_forcing_times.append(ft)
 
@@ -475,7 +478,8 @@ class MultiTaskDatasetWithMissingLabels(Dataset):
 
             for idx in range(range_start_idx, range_end_idx - seq_length + 1, WINDOW_STEP):
                 window_start_time = forcing_times[idx]
-                window_end_time = window_start_time + pd.Timedelta(hours=(seq_length - 1) * 3)
+                # 目标时刻后移一步：t₀ + L*3h
+                window_end_time = window_start_time + pd.Timedelta(hours=seq_length * 3)
                 if window_end_time in valid_target_times:
                     lookup.append((basin, window_start_time))
 

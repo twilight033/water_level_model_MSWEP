@@ -12,8 +12,9 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 import torch.nn as nn
 import torch.nn.functional as F
-from improved_camelsh_reader import ImprovedCAMELSHReader
+from hydrodataset.camelsh import Camelsh
 from hydrodataset import StandardVariable
+from improved_camelsh_reader import ImprovedCAMELSHReader
 import HydroErr as he
 from mswep_loader import load_mswep_data, merge_forcing_with_mswep
 
@@ -28,7 +29,6 @@ TEST_RATIO = 0.2
 
 # 滑窗步长（经验值）：序列起点之间的时间步间隔，减小步长会增加样本数和内存占用
 WINDOW_STEP = 3  # 对小时数据，相当于每隔 24 小时（1 天）取一个样本起点
-
 def print_device_info():
     """打印设备信息"""
     print("\n" + "=" * 60)
@@ -72,6 +72,893 @@ def configure_chinese_font():
             continue
     print("警告: 未找到可用的中文字体，图表可能无法正常显示中文字符")
     plt.rcParams["axes.unicode_minus"] = False
+
+
+class MultiTaskDataset(Dataset):
+    """多任务数据集类，用于加载径流和水位数据（batch-first）"""
+
+    def __init__(
+        self,
+        basins: list,
+        dates: list,
+        data_attr: pd.DataFrame,
+        data_forcing: xr.Dataset,
+        data_flow: pd.DataFrame,  # 径流数据（自定义）
+        data_waterlevel: pd.DataFrame,  # 水位数据（自定义）
+        loader_type: str = "train",
+        seq_length: int = 100,
+        means: dict = None,
+        stds: dict = None,
+    ):
+        """
+        初始化多任务数据集
+
+        Parameters
+        ----------
+        basins : list
+            流域ID列表
+        dates : list
+            时间范围 [start_date, end_date]
+        data_attr : pd.DataFrame
+            流域属性数据
+        data_forcing : xr.Dataset
+            气象强迫数据（来自CAMELS）
+        data_flow : pd.DataFrame
+            径流数据（自定义文件），格式：index为时间，columns为流域ID
+        data_waterlevel : pd.DataFrame
+            水位数据（自定义文件），格式：index为时间，columns为流域ID
+        loader_type : str, optional
+            数据集类型 "train", "valid", "test"
+        seq_length : int, optional
+            输入序列长度
+        means : dict, optional
+            归一化均值字典
+        stds : dict, optional
+            归一化标准差字典
+        """
+        super(MultiTaskDataset, self).__init__()
+        if loader_type not in ["train", "valid", "test"]:
+            raise ValueError(
+                " 'loader_type' must be one of 'train', 'valid' or 'test' "
+            )
+        else:
+            self.loader_type = loader_type
+        # 确保basins列表中的元素都是字符串类型，以保持一致性
+        self.basins = [str(b) for b in basins]
+        self.dates = dates
+
+        self.seq_length = seq_length
+
+        # 初始化均值和标准差（如果是训练模式，会在_load_data中计算；否则从参数传入）
+        self.means = means if means is not None else {}
+        self.stds = stds if stds is not None else {}
+
+        self.data_attr = data_attr
+        self.data_forcing = data_forcing
+        self.data_flow = data_flow
+        self.data_waterlevel = data_waterlevel
+
+        # 加载和预处理数据
+        self._load_data()
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, item: int):
+        basin, time_idx = self.lookup_table[item]
+        seq_length = self.seq_length
+        
+        # 获取输入序列
+        # time_idx 是真实 datetime，需要找到整数位置
+        # 注意：强迫数据和目标数据可能有不同的时间索引（3小时 vs 小时）
+        if hasattr(self, 'forcing_time_index') and self.forcing_time_index is not None:
+            # 使用强迫数据的时间索引
+            if time_idx not in self.forcing_time_index:
+                # 如果时间索引不存在，找最近的
+                closest_idx = self.forcing_time_index.get_indexer([time_idx], method='nearest')[0]
+                start_pos = closest_idx
+            else:
+                start_pos = self.forcing_time_index.get_loc(time_idx)
+        else:
+            # 降级方案：使用目标数据的时间索引
+            start_pos = self.data_flow.index.get_loc(time_idx)
+        
+        x = self.x[basin][start_pos : start_pos + seq_length]
+        
+        # 检查强迫数据维度
+        if len(x) == 0:
+            print(f"[错误] 样本 {item}: 强迫数据x为空")
+            print(f"  流域: {basin}, 时间索引: {time_idx}")
+            print(f"  start_pos: {start_pos}, seq_length: {seq_length}")
+            print(f"  强迫数据总长度: {len(self.x[basin])}")
+            raise ValueError("强迫数据x为空")
+        
+        # 检查强迫数据
+        if np.isnan(x).any():
+            print(f"[错误] 样本 {item}: 强迫数据x包含NaN")
+            print(f"  流域: {basin}, 时间索引: {time_idx}")
+            print(f"  x形状: {x.shape}")
+            raise ValueError("强迫数据x包含NaN")
+        
+        c = self.c.loc[basin].values
+        
+        # 检查属性数据
+        if np.isnan(c).any():
+            print(f"[错误] 样本 {item}: 属性数据c包含NaN")
+            print(f"  流域: {basin}")
+            print(f"  c值: {c}")
+            raise ValueError("属性数据c包含NaN")
+        
+        c = np.tile(c, (seq_length, 1))
+        xc = np.concatenate((x, c), axis=1)
+        
+        # 获取两个目标输出（序列最后一天的值）
+        # 注意：目标数据使用原始时间索引，需要从lookup_table中获取的time_idx开始计算
+        target_time_idx = time_idx
+        # MSWEP t时刻值代表t→t+3h的累计降雨（向前约定），
+        # 目标后移一步至 t₀+L*3h，消除最后一步输入使用未来降雨的数据泄露。
+        if target_time_idx in self.data_flow.index:
+            end_time = target_time_idx + pd.Timedelta(hours=seq_length * 3)
+            if end_time in self.data_flow.index:
+                target_end_pos = self.data_flow.index.get_loc(end_time)
+                y_flow = self.y_flow[basin][target_end_pos]
+                y_waterlevel = self.y_waterlevel[basin][target_end_pos]
+            else:
+                nearest_idx = self.data_flow.index.get_indexer([end_time], method='nearest')[0]
+                y_flow = self.y_flow[basin][nearest_idx]
+                y_waterlevel = self.y_waterlevel[basin][nearest_idx]
+        else:
+            nearest_idx = self.data_flow.index.get_indexer([target_time_idx], method='nearest')[0]
+            end_time = target_time_idx + pd.Timedelta(hours=seq_length * 3)
+            nearest_end_idx = self.data_flow.index.get_indexer([end_time], method='nearest')[0]
+            y_flow = self.y_flow[basin][nearest_end_idx]
+            y_waterlevel = self.y_waterlevel[basin][nearest_end_idx]
+        
+        # 将两个目标合并为一个向量
+        y = np.array([y_flow, y_waterlevel])
+        
+        # 最终NaN检查
+        if np.isnan(xc).any():
+            print(f"[错误] 样本 {item}: 输入特征包含NaN")
+            print(f"  流域: {basin}, 时间索引: {time_idx}")
+            raise ValueError("输入特征包含NaN")
+        
+        if np.isnan(y).any():
+            print(f"[错误] 样本 {item}: 目标值包含NaN")
+            print(f"  流域: {basin}, 时间索引: {time_idx}")
+            print(f"  目标时间: {end_time}")
+            print(f"  y_flow: {y_flow}, y_waterlevel: {y_waterlevel}")
+            raise ValueError("目标值包含NaN")
+        
+        return torch.from_numpy(xc).float(), torch.from_numpy(y).float(), basin
+
+    def _load_data(self):
+        """从文件加载数据 - 增强NaN检查和处理"""
+        if self.loader_type == "train":
+            train_mode = True
+            # 计算归一化参数
+            self.means = {}
+            self.stds = {}
+            
+            # 检查原始数据中的NaN
+            print("检查原始数据中的NaN...")
+            
+            # 检查强迫数据
+            forcing_nan_count = self.data_forcing.isnull().sum().sum()
+            print(f"强迫数据NaN统计: {forcing_nan_count}")
+            if forcing_nan_count > 0:
+                print(f"[警告] 强迫数据包含NaN值，将使用插值填充")
+                # 使用简单的插值方法
+                self.data_forcing = self.data_forcing.interpolate_na(dim='time', method='linear')
+                # 如果还有NaN，用均值填充
+                remaining_nan = self.data_forcing.isnull().sum().sum()
+                if remaining_nan > 0:
+                    self.data_forcing = self.data_forcing.fillna(self.data_forcing.mean())
+            
+            # 检查属性数据
+            attr_nan_count = self.data_attr.isnull().sum().sum()
+            if attr_nan_count > 0:
+                print(f"[警告] 属性数据包含 {attr_nan_count} 个NaN值，将使用均值填充")
+                numeric_cols = [col for col in self.data_attr.columns if col != 'gauge_id']
+                self.data_attr[numeric_cols] = self.data_attr[numeric_cols].fillna(self.data_attr[numeric_cols].mean())
+            
+            # ========== 修复：不要对径流/水位数据做全局填充！==========
+            # 只检查NaN数量，不做任何填充！
+            # 后续在 _create_lookup_table 中会通过 dropna() 只使用有真实数据的时间点
+            flow_nan_count = self.data_flow.isnull().sum().sum()
+            flow_total = self.data_flow.size
+            flow_valid_ratio = (flow_total - flow_nan_count) / flow_total if flow_total > 0 else 0
+            print(f"[信息] 径流数据统计:")
+            print(f"  - 总数据点: {flow_total}")
+            print(f"  - 有效数据点: {flow_total - flow_nan_count} ({flow_valid_ratio:.1%})")
+            print(f"  - NaN数据点: {flow_nan_count} ({flow_nan_count/flow_total:.1%})")
+            
+            wl_nan_count = self.data_waterlevel.isnull().sum().sum()
+            wl_total = self.data_waterlevel.size
+            wl_valid_ratio = (wl_total - wl_nan_count) / wl_total if wl_total > 0 else 0
+            print(f"[信息] 水位数据统计:")
+            print(f"  - 总数据点: {wl_total}")
+            print(f"  - 有效数据点: {wl_total - wl_nan_count} ({wl_valid_ratio:.1%})")
+            print(f"  - NaN数据点: {wl_nan_count} ({wl_nan_count/wl_total:.1%})")
+            print(f"  注意：NaN数据将被自动跳过，只使用真实观测数据进行训练")
+            
+            # 气象强迫数据的均值和标准差
+            df_mean_forcings = self.data_forcing.mean().to_pandas()
+            df_std_forcings = self.data_forcing.std().to_pandas()
+            
+            # 检查计算出的统计量
+            if df_mean_forcings.isnull().any() or df_std_forcings.isnull().any():
+                print("[错误] 强迫数据统计量包含NaN")
+                raise ValueError("强迫数据统计量包含NaN")
+            
+            self.means['forcing'] = df_mean_forcings
+            self.stds['forcing'] = df_std_forcings
+            
+            # 属性数据的均值和标准差（排除 gauge_id）
+            numeric_cols = [col for col in self.data_attr.columns if col != 'gauge_id']
+            numeric_attrs = self.data_attr[numeric_cols]
+            df_mean_attr = numeric_attrs.mean()
+            df_std_attr = numeric_attrs.std(ddof=0).fillna(0.0)
+            
+            # 检查计算出的统计量
+            if df_mean_attr.isnull().any():
+                print("[错误] 属性数据统计量均值包含NaN")
+                raise ValueError("属性数据统计量包含NaN")
+            
+            self.means['attr'] = df_mean_attr
+            self.stds['attr'] = df_std_attr
+            
+            # 径流数据的均值和标准差（每个流域独立计算）
+            flow_mean = {}
+            flow_std = {}
+            for basin in self.basins:
+                # self.basins已经是字符串列表了
+                series = self.data_flow[basin]
+                flow_mean[basin] = series.mean()
+                flow_std[basin] = series.std() if series.std() > 1e-6 else 1.0
+            
+            self.means['flow'] = flow_mean
+            self.stds['flow'] = flow_std
+            
+            # 水位数据的均值和标准差（每个流域独立计算）
+            waterlevel_mean = {}
+            waterlevel_std = {}
+            for basin in self.basins:
+                # self.basins已经是字符串列表了
+                series = self.data_waterlevel[basin]
+                waterlevel_mean[basin] = series.mean()
+                waterlevel_std[basin] = series.std() if series.std() > 1e-6 else 1.0
+
+            self.means['waterlevel'] = waterlevel_mean
+            self.stds['waterlevel'] = waterlevel_std
+
+            
+            # 最终NaN检查（只检查强迫数据和属性数据，径流/水位数据允许有NaN）
+            final_forcing_nan = int(self.data_forcing.isnull().to_array().sum().values)
+            final_attr_nan = self.data_attr[numeric_cols].isnull().sum().sum()
+            
+            if final_forcing_nan > 0 or final_attr_nan > 0:
+                print(f"[错误] 强迫/属性数据清洗后仍有NaN: 强迫={final_forcing_nan}, 属性={final_attr_nan}")
+                raise ValueError("强迫/属性数据清洗失败，仍存在NaN值")
+            else:
+                print("数据统计量计算完成")
+        else:
+            train_mode = False
+
+        # 归一化处理
+        print("开始数据归一化...")
+        
+        # 保存强迫数据的时间索引，用于后续查找
+        self.forcing_time_index = pd.DatetimeIndex(self.data_forcing.time.values)
+        
+        self.x = self._normalize_forcing(self.data_forcing)
+        
+        # 更新basins列表为实际归一化成功的流域
+        successfully_normalized_basins = list(self.x.keys())
+        if len(successfully_normalized_basins) < len(self.basins):
+            skipped_count = len(self.basins) - len(successfully_normalized_basins)
+            print(f"[信息] {skipped_count} 个流域因强迫数据问题被跳过")
+            self.basins = successfully_normalized_basins
+            print(f"归一化后实际可用的流域数量: {len(self.basins)} 个")
+        
+        if len(self.basins) == 0:
+            raise ValueError("归一化后没有任何可用流域！")
+        
+        print("强迫数据归一化完成")
+        self.c = self._normalize_attr(self.data_attr)
+        print("属性数据归一化完成")
+        
+        # 所有模式都需要归一化目标变量，保持一致性
+        self.y_flow = self._normalize_flow(self.data_flow)
+        self.y_waterlevel = self._normalize_waterlevel(self.data_waterlevel)
+        
+        # 同时保存原始数据用于评估
+        if not train_mode:
+            self.y_flow_raw = self._dataframe_to_dict(self.data_flow)
+            self.y_waterlevel_raw = self._dataframe_to_dict(self.data_waterlevel)
+        
+        self.train_mode = train_mode
+        self._create_lookup_table()
+
+    def _dataframe_to_dict(self, df):
+        """将DataFrame转换为字典格式，保持NaN不变"""
+        result = {}
+        for basin in self.basins:
+            values = df[basin].values
+            # 保持NaN不变，不做任何填充
+            # NaN时间点会在 _create_lookup_table 中被自动跳过
+            result[basin] = values
+        return result
+
+    def _normalize_forcing(self, data_forcing):
+        """归一化气象强迫数据 - 增强NaN检查"""
+        result = {}
+        
+        # 检查统计量
+        print(f"强迫数据统计量检查:")
+        print(f"  均值: {self.means['forcing'].values}")
+        print(f"  标准差: {self.stds['forcing'].values}")
+        
+        # 处理标准差为0的情况（避免除零错误）
+        std_values = self.stds['forcing'].values.copy()
+        zero_std_mask = std_values < 1e-8
+        if np.any(zero_std_mask):
+            print(f"警告：发现标准差接近0的强迫变量，将设为1避免除零错误")
+            std_values[zero_std_mask] = 1.0
+        
+        # 获取强迫数据中实际可用的流域列表
+        available_basins_in_data = [str(b) for b in data_forcing.basin.values]
+        
+        for basin in self.basins:
+            basin_str = str(basin)
+            
+            # 检查basin是否在数据中
+            if basin_str not in available_basins_in_data:
+                print(f"[警告] 流域 {basin_str} 不在强迫数据中，跳过")
+                continue
+            
+            try:
+                basin_data = data_forcing.sel(basin=basin_str).to_array().to_numpy().T
+            except KeyError:
+                # 如果sel失败，尝试使用原始basin值
+                try:
+                    basin_data = data_forcing.sel(basin=basin).to_array().to_numpy().T
+                except KeyError:
+                    print(f"[警告] 流域 {basin_str} 无法从强迫数据中提取，跳过")
+                    continue
+            
+            # 检查原始数据是否包含NaN
+            if np.isnan(basin_data).any():
+                nan_count = np.isnan(basin_data).sum()
+                total_count = basin_data.size
+                nan_ratio = nan_count / total_count * 100
+                print(f"[警告] 流域 {basin_str} 强迫数据包含NaN (数量: {nan_count}/{total_count}, {nan_ratio:.1f}%)，跳过该流域")
+                continue
+            
+            normalized = (basin_data - self.means['forcing'].values) / std_values
+            
+            # 检查归一化后的数据是否包含NaN
+            if np.isnan(normalized).any():
+                print(f"[警告] 流域 {basin_str} 归一化后强迫数据包含NaN，跳过该流域")
+                continue
+            
+            result[basin_str] = normalized
+        return result
+
+    def _normalize_attr(self, data_attr):
+        """归一化属性数据（只处理数值列）- 增强NaN检查"""
+        # 分离 gauge_id 和数值列
+        gauge_ids = data_attr['gauge_id']
+        numeric_cols = [col for col in data_attr.columns if col != 'gauge_id']
+        numeric_attrs = data_attr[numeric_cols]
+        
+        print(f"属性数据归一化检查:")
+        print(f"  原始属性数据形状: {numeric_attrs.shape}")
+        print(f"  均值: {self.means['attr'].values}")
+        print(f"  标准差: {self.stds['attr'].values}")
+        
+        # 检查是否有标准差为0的列
+        zero_std_mask = self.stds['attr'] < 1e-8
+        if zero_std_mask.any():
+            print(f"[警告] 发现标准差接近0的属性列: {self.stds['attr'][zero_std_mask].index.tolist()}")
+            # 对标准差为0的列，设置标准差为1（这样归一化后为0）
+            std_values = self.stds['attr'].copy()
+            std_values[zero_std_mask] = 1.0
+        else:
+            std_values = self.stds['attr']
+        
+        # 归一化数值列
+        normalized = (numeric_attrs - self.means['attr']) / std_values
+        
+        # 检查归一化后是否有NaN
+        if normalized.isnull().any().any():
+            print(f"[错误] 属性数据归一化后包含NaN")
+            print(f"  NaN位置:")
+            for col in normalized.columns:
+                if normalized[col].isnull().any():
+                    print(f"    列 {col}: {normalized[col].isnull().sum()} 个NaN")
+            raise ValueError("属性数据归一化后包含NaN")
+        
+        # 设置索引为 gauge_id，以便后续通过流域ID访问
+        normalized.index = gauge_ids
+        return normalized
+
+    def _normalize_flow(self, data_flow):
+        """归一化径流数据（按流域独立归一化）- 保持NaN不变"""
+        result = {}
+        for basin in self.basins:
+            # self.basins已经是字符串列表了
+            values = data_flow[basin].values
+            
+            # 获取该流域的均值和标准差
+            if basin not in self.means.get('flow', {}):
+                raise KeyError(f"流域 {basin} 的径流归一化参数不存在")
+            mean = self.means['flow'][basin]
+            std = self.stds['flow'][basin]
+            
+            # 直接归一化，保持NaN不变
+            normalized = (values - mean) / std
+            
+            # NaN是正常的，因为不是所有时间点都有观测
+            # 这些NaN时间点会在 _create_lookup_table 中被 dropna() 自动跳过
+            
+            result[basin] = normalized
+        return result
+
+    def _normalize_waterlevel(self, data_waterlevel):
+        """归一化水位数据（按流域独立归一化）- 保持NaN不变"""
+        result = {}
+        for basin in self.basins:
+            # self.basins已经是字符串列表了
+            values = data_waterlevel[basin].values
+            
+            # 获取该流域的均值和标准差
+            if basin not in self.means.get('waterlevel', {}):
+                raise KeyError(f"流域 {basin} 的水位归一化参数不存在")
+            mean = self.means['waterlevel'][basin]
+            std = self.stds['waterlevel'][basin]
+            
+            # 直接归一化，保持NaN不变
+            normalized = (values - mean) / std
+            
+            # NaN是正常的，因为不是所有时间点都有观测
+            # 这些NaN时间点会在 _create_lookup_table 中被 dropna() 自动跳过
+            
+            result[basin] = normalized
+        return result
+
+    def _create_lookup_table(self):
+        """
+        为每个流域独立构建滑窗索引，并按该流域自身完整时间范围做比例切分。
+
+        说明：
+        - 对每个流域，从归一化后的 flow/waterlevel 数据中找出非NaN时间索引
+        - 按 (TRAIN_RATIO, VALID_RATIO, TEST_RATIO) 进行时间顺序切分
+        - 在滑窗时，确保每个窗口内的数据是真正连续的（flow和waterlevel都非NaN）
+        - **关键**：使用强迫数据的时间索引（3小时分辨率）作为基准
+        """
+        lookup = []
+        seq_length = self.seq_length
+        skipped_basins = []
+        basins_with_samples = []
+        basin_time_ranges = {}  # 记录每个流域的时间范围
+        
+        # 使用强迫数据的时间索引作为基准（3小时分辨率）
+        forcing_times = self.forcing_time_index
+
+        for basin in tqdm(self.basins, desc=f"创建 {self.loader_type} 索引表", disable=False):
+            if basin not in self.y_flow or basin not in self.y_waterlevel:
+                skipped_basins.append(basin)
+                continue
+            
+            # 找出flow和waterlevel都非NaN的位置
+            flow_values = self.y_flow[basin]
+            wl_values = self.y_waterlevel[basin]
+            target_index = self.data_flow.index
+            
+            flow_valid_mask = ~np.isnan(flow_values)
+            wl_valid_mask = ~np.isnan(wl_values)
+            both_valid = flow_valid_mask & wl_valid_mask
+            
+            # 获取目标数据中所有有效的时间索引
+            valid_target_times = set(target_index[both_valid])
+            
+            # 找出强迫数据时间点中，对应的目标数据也有效的时间点
+            valid_forcing_times = []
+            for ft in forcing_times:
+                # 目标时刻后移一步：t₀ + L*3h（消除MSWEP向前累计约定导致的数据泄露）
+                end_time = ft + pd.Timedelta(hours=seq_length * 3)
+                if end_time in valid_target_times:
+                    valid_forcing_times.append(ft)
+
+            if len(valid_forcing_times) < 1:
+                skipped_basins.append(basin)
+                continue
+
+            # 找出有效时间的起止
+            first_valid_time = valid_forcing_times[0]
+            last_valid_time = valid_forcing_times[-1]
+            
+            # 在强迫数据时间索引中找到位置
+            start_idx = forcing_times.get_loc(first_valid_time)
+            end_idx = forcing_times.get_loc(last_valid_time)
+            
+            # 计算时间跨度
+            total_span = end_idx - start_idx + 1
+            
+            # 按比例划分
+            train_end_idx = start_idx + int(total_span * TRAIN_RATIO)
+            valid_end_idx = start_idx + int(total_span * (TRAIN_RATIO + VALID_RATIO))
+            
+            # 根据loader_type确定范围
+            if self.loader_type == "train":
+                range_start_idx = start_idx
+                range_end_idx = train_end_idx
+            elif self.loader_type == "valid":
+                range_start_idx = train_end_idx
+                range_end_idx = valid_end_idx
+            else:  # "test"
+                range_start_idx = valid_end_idx
+                range_end_idx = end_idx + 1
+            
+            # 检查范围内是否有足够样本
+            if range_end_idx - range_start_idx < seq_length:
+                continue
+            
+            # 在该范围内滑窗
+            num_samples_this_basin = 0
+            for idx in range(range_start_idx, range_end_idx - seq_length + 1, WINDOW_STEP):
+                # 获取这个窗口的起始时间
+                window_start_time = forcing_times[idx]
+                # 目标时刻后移一步：t₀ + L*3h
+                window_end_time = window_start_time + pd.Timedelta(hours=seq_length * 3)
+                
+                # 检查结束时间的目标数据是否有效
+                if window_end_time in valid_target_times:
+                    lookup.append((basin, window_start_time))
+                    num_samples_this_basin += 1
+            
+            if num_samples_this_basin > 0:
+                basins_with_samples.append(basin)
+                # 记录该流域的时间范围信息
+                basin_time_ranges[basin] = {
+                    'first_valid': str(first_valid_time),
+                    'last_valid': str(last_valid_time),
+                    'total_valid_hours': len(valid_forcing_times),
+                    'loader_start': str(forcing_times[range_start_idx]),
+                    'loader_end': str(forcing_times[range_end_idx - 1]) if range_end_idx > 0 else str(forcing_times[-1]),
+                    'num_samples': num_samples_this_basin
+                }
+
+        self.lookup_table = {i: elem for i, elem in enumerate(lookup)}
+        self.num_samples = len(self.lookup_table)
+        print(f"\n{self.loader_type.upper()} 数据集统计:")
+        print(f"  - 总样本数: {self.num_samples}")
+        print(f"  - 有样本的流域数: {len(basins_with_samples)}/{len(self.basins)}")
+        if skipped_basins:
+            print(f"  - 跳过的流域（不在数据中）: {len(skipped_basins)} 个")
+            if len(skipped_basins) <= 10:
+                print(f"    示例: {skipped_basins}")
+        
+        # 打印前几个流域的时间范围信息（验证每个流域有自己的时间区间）
+        if basin_time_ranges and self.loader_type == "train":  # 只在训练集时打印，避免重复
+            print(f"\n  各流域时间范围示例 (前5个):")
+            for i, (basin_id, info) in enumerate(list(basin_time_ranges.items())[:5]):
+                print(f"    流域 {basin_id}:")
+                print(f"      完整数据范围: {info['first_valid']} 到 {info['last_valid']} (共{info['total_valid_hours']}个3小时步)")
+                print(f"      {self.loader_type.upper()}期范围: {info['loader_start']} 到 {info['loader_end']}")
+                print(f"      生成样本数: {info['num_samples']}")
+        
+        if self.num_samples == 0:
+            raise ValueError(f"{self.loader_type} 数据集没有生成任何样本！请检查数据有效性。")
+
+
+    def get_means(self):
+        return self.means
+
+    def get_stds(self):
+        return self.stds
+
+    def local_denormalization(self, feature, basin, variable="flow"):
+        """按流域反归一化"""
+        # 确保basin是字符串类型
+        basin = str(basin)
+        
+        if variable == "flow":
+            if basin not in self.means.get('flow', {}):
+                raise KeyError(f"流域 {basin} 的径流归一化参数不存在")
+            mean = self.means['flow'][basin]
+            std = self.stds['flow'][basin]
+            return feature * std + mean
+        elif variable == "waterlevel":
+            if basin not in self.means.get('waterlevel', {}):
+                raise KeyError(f"流域 {basin} 的水位归一化参数不存在")
+            mean = self.means['waterlevel'][basin]
+            std = self.stds['waterlevel'][basin]
+            return feature * std + mean
+        else:
+            raise ValueError(f"Unknown variable: {variable}")
+
+
+
+class MultiTaskLSTM(nn.Module):
+    """双头多任务LSTM网络，同时预测径流和水位"""
+
+    def __init__(
+        self, 
+        input_size: int, 
+        hidden_size: int, 
+        dropout_rate: float = 0.0,
+        task_weights: dict = None
+    ):
+        """
+        构建多任务LSTM模型
+
+        Parameters
+        ----------
+        input_size : int
+            输入特征维度
+        hidden_size : int
+            LSTM隐藏层大小
+        dropout_rate : float, optional
+            Dropout比率
+        task_weights : dict, optional
+            任务权重 {'flow': w1, 'waterlevel': w2}，默认均为1.0
+        """
+        super(MultiTaskLSTM, self).__init__()
+
+        # 共享的LSTM层
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=2,
+            bias=True,
+            batch_first=True,
+        )
+        self.dropout = nn.Dropout(p=dropout_rate)
+        
+        # 两个独立的输出头
+        self.fc_flow = nn.Linear(in_features=hidden_size, out_features=1)
+        self.fc_waterlevel = nn.Linear(in_features=hidden_size, out_features=1)
+        
+        # 任务权重
+        if task_weights is None:
+            self.task_weights = {'flow': 1.0, 'waterlevel': 1.0}
+        else:
+            self.task_weights = task_weights
+
+    def forward(self, x: torch.Tensor) -> tuple:
+        """
+        前向传播
+
+        Returns
+        -------
+        tuple
+            (径流预测, 水位预测)
+        """
+        output, (h_n, c_n) = self.lstm(x)
+
+        # 使用最后一层的隐藏状态
+        hidden = self.dropout(h_n[-1, :, :])
+        
+        # 两个独立的预测头
+        pred_flow = self.fc_flow(hidden)
+        pred_waterlevel = self.fc_waterlevel(hidden)
+        
+        return pred_flow, pred_waterlevel
+
+
+def multi_task_loss(pred_flow, pred_waterlevel, target, loss_func, task_weights):
+    """
+    多任务损失函数
+
+    Parameters
+    ----------
+    pred_flow : torch.Tensor
+        径流预测值
+    pred_waterlevel : torch.Tensor
+        水位预测值
+    target : torch.Tensor
+        目标值 [batch_size, 2]，第一列是径流，第二列是水位
+    loss_func : callable
+        基础损失函数（如MSELoss）
+    task_weights : dict
+        任务权重
+
+    Returns
+    -------
+    tuple
+        (总损失, 径流损失, 水位损失)
+    """
+    loss_flow = loss_func(pred_flow, target[:, 0:1])
+    loss_waterlevel = loss_func(pred_waterlevel, target[:, 1:2])
+    
+    total_loss = (
+        task_weights['flow'] * loss_flow + 
+        task_weights['waterlevel'] * loss_waterlevel
+    )
+    
+    return total_loss, loss_flow, loss_waterlevel
+
+
+def train_epoch(model, optimizer, loader, loss_func, epoch):
+    """训练一个epoch - 增强NaN检查和错误处理"""
+    model.train()
+    pbar = tqdm(loader)
+    pbar.set_description(f"Epoch {epoch}")
+    
+    epoch_loss = 0.0
+    epoch_loss_flow = 0.0
+    epoch_loss_waterlevel = 0.0
+    
+    for batch_idx, (xs, ys,basins) in enumerate(pbar):
+        # 检查输入数据
+        if torch.isnan(xs).any() or torch.isnan(ys).any():
+            print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 输入数据包含NaN")
+            raise ValueError("输入数据包含NaN")
+        
+        optimizer.zero_grad()
+        xs, ys = xs.to(DEVICE), ys.to(DEVICE)
+        
+        # 获取模型预测
+        try:
+            pred_flow, pred_waterlevel = model(xs)
+        except Exception as e:
+            print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 前向传播失败 - {e}")
+            raise e
+        
+        # 检查预测结果
+        if torch.isnan(pred_flow).any() or torch.isnan(pred_waterlevel).any():
+            print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 预测结果包含NaN")
+            raise ValueError("预测结果包含NaN")
+        
+        # 计算损失
+        total_loss, loss_flow, loss_waterlevel = multi_task_loss(
+            pred_flow, pred_waterlevel, ys, loss_func, model.task_weights
+        )
+        
+        # 检查损失
+        if torch.isnan(total_loss) or torch.isnan(loss_flow) or torch.isnan(loss_waterlevel):
+            print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 损失包含NaN")
+            print(f"  total_loss: {total_loss.item()}")
+            print(f"  loss_flow: {loss_flow.item()}")
+            print(f"  loss_waterlevel: {loss_waterlevel.item()}")
+            raise ValueError("损失包含NaN")
+        
+        # 反向传播
+        total_loss.backward()
+        
+        # 检查梯度
+        grad_norm = 0.0
+        for param in model.parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2)
+                grad_norm += param_norm.item() ** 2
+                if torch.isnan(param.grad).any():
+                    print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 梯度包含NaN")
+                    raise ValueError("梯度包含NaN")
+        grad_norm = grad_norm ** 0.5
+        
+        # 梯度裁剪防止梯度爆炸
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        optimizer.step()
+        
+        # 累计损失
+        epoch_loss += total_loss.item()
+        epoch_loss_flow += loss_flow.item()
+        epoch_loss_waterlevel += loss_waterlevel.item()
+        
+        # 更新进度条
+        pbar.set_postfix_str(
+            f"Loss: {total_loss.item():.4f} "
+            f"(Q: {loss_flow.item():.4f}, h: {loss_waterlevel.item():.4f}, "
+            f"Grad: {grad_norm:.4f})"
+        )
+    
+    # 检查epoch平均损失
+    avg_loss = epoch_loss / len(loader)
+    avg_loss_flow = epoch_loss_flow / len(loader)
+    avg_loss_waterlevel = epoch_loss_waterlevel / len(loader)
+    
+    if np.isnan(avg_loss) or np.isnan(avg_loss_flow) or np.isnan(avg_loss_waterlevel):
+        print(f"[错误] Epoch {epoch}: 平均损失包含NaN")
+        raise ValueError("平均损失包含NaN")
+    
+    return avg_loss, avg_loss_flow, avg_loss_waterlevel
+
+
+def eval_model(model, loader):
+    """评估模型：按流域分组返回观测和预测结果（不再返回一条长向量）"""
+    model.eval()
+    
+    # 按流域存放结果：key = basin（流域ID），value = numpy数组
+    obs_flow = {}
+    obs_waterlevel = {}
+    preds_flow = {}
+    preds_waterlevel = {}
+    
+    with torch.no_grad():
+        for xs, ys, basins in loader:
+            xs = xs.to(DEVICE)
+            pred_flow, pred_waterlevel = model(xs)
+            
+            # 统一搬到 CPU + numpy，方便后面处理
+            ys_np = ys.numpy()  # [batch, 2]
+            pf_np = pred_flow.cpu().numpy().squeeze()      # [batch]
+            pw_np = pred_waterlevel.cpu().numpy().squeeze()  # [batch]
+            
+            # 有可能 squeeze 后变成标量，统一处理成一维
+            if pf_np.ndim == 0:
+                pf_np = pf_np.reshape(1)
+            if pw_np.ndim == 0:
+                pw_np = pw_np.reshape(1)
+            
+            for i, basin in enumerate(basins):
+                b = str(basin)
+                
+                if b not in obs_flow:
+                    obs_flow[b] = []
+                    obs_waterlevel[b] = []
+                    preds_flow[b] = []
+                    preds_waterlevel[b] = []
+                
+                obs_flow[b].append(ys_np[i, 0])
+                obs_waterlevel[b].append(ys_np[i, 1])
+                preds_flow[b].append(pf_np[i])
+                preds_waterlevel[b].append(pw_np[i])
+    
+    # 列表转成 numpy 数组
+        # --- 必须排序：否则 NSE 错！！ ---
+    sorted_obs_flow = {}
+    sorted_obs_waterlevel = {}
+    sorted_preds_flow = {}
+    sorted_preds_waterlevel = {}
+
+    for b in obs_flow.keys():
+        # 收集时间位置
+        t = np.array([i for i in range(len(obs_flow[b]))])
+        order = np.argsort(t)
+
+        sorted_obs_flow[b] = np.array(obs_flow[b])[order]
+        sorted_obs_waterlevel[b] = np.array(obs_waterlevel[b])[order]
+        sorted_preds_flow[b] = np.array(preds_flow[b])[order]
+        sorted_preds_waterlevel[b] = np.array(preds_waterlevel[b])[order]
+
+    return sorted_obs_flow, sorted_obs_waterlevel, sorted_preds_flow, sorted_preds_waterlevel
+
+
+
+
+def load_custom_data(file_path, basins, time_range):
+    """
+    加载自定义的径流或水位数据
+    
+    文件格式要求：
+    - CSV文件
+    - 第一列为日期（格式：YYYY-MM-DD）
+    - 其余列为各流域的观测值，列名为流域ID
+    
+    Parameters
+    ----------
+    file_path : str
+        数据文件路径
+    basins : list
+        流域ID列表
+    time_range : list
+        时间范围 [start_date, end_date]
+    
+    Returns
+    -------
+    pd.DataFrame
+        处理后的数据
+    """
+    df = pd.read_csv(file_path, index_col=0, parse_dates=True)
+    
+    # 选择指定流域和时间范围
+    selected_data = df.loc[time_range[0]:time_range[1], basins]
+    
+    return selected_data
 
 
 def set_random_seed(seed):
@@ -148,9 +1035,9 @@ def load_waterlevel_basins_from_file(file_path="valid_waterlevel_basins.txt"):
         raise
 
 
-def filter_basins_with_valid_data(camelsh_reader, basin_list, time_range, target_type, max_basins_to_check=None, min_valid_ratio=0.1):
+def filter_basins_with_valid_data(camelsh_reader, basin_list, time_range, max_basins_to_check=None, min_valid_ratio=0.1):
     """
-    验证流域列表，只保留有有效目标数据（不全为NaN）的流域
+    验证流域列表，只保留同时有有效水位和径流数据（不全为NaN）的流域
     
     Parameters
     ----------
@@ -160,8 +1047,6 @@ def filter_basins_with_valid_data(camelsh_reader, basin_list, time_range, target
         候选流域ID列表
     time_range : list
         时间范围 [start_date, end_date]，用于验证数据有效性
-    target_type : str
-        目标类型 "flow" 或 "waterlevel"
     max_basins_to_check : int, optional
         最多检查的流域数量，如果为None则检查全部
     min_valid_ratio : float, optional
@@ -170,9 +1055,9 @@ def filter_basins_with_valid_data(camelsh_reader, basin_list, time_range, target
     Returns
     -------
     list
-        过滤后的有效流域ID列表
+        过滤后的有效流域ID列表（同时有有效水位和径流数据）
     """
-    print(f"\n正在验证流域的{target_type}数据有效性...")
+    print(f"\n正在验证流域的水位和径流数据有效性...")
     print(f"候选流域数量: {len(basin_list)}")
     print(f"验证时间范围: {time_range}")
     print(f"最小有效数据比例: {min_valid_ratio:.1%}")
@@ -184,71 +1069,84 @@ def filter_basins_with_valid_data(camelsh_reader, basin_list, time_range, target
     valid_basins = []
     invalid_basins = []
     
-    # 确定目标变量
-    if target_type == "flow":
-        target_var = StandardVariable.STREAMFLOW
-    elif target_type == "waterlevel":
-        target_var = StandardVariable.WATER_LEVEL
-    else:
-        raise ValueError(f"未知的目标类型: {target_type}")
-    
     # 批量检查（每次检查一批以提高效率）
     batch_size = 50
     for i in tqdm(range(0, len(basins_to_check), batch_size), desc="验证流域数据"):
         batch = basins_to_check[i:i+batch_size]
         
         try:
-            # 加载这批流域的目标数据
-            target_ds = camelsh_reader.read_ts_xrdataset(
+            # 同时加载这批流域的水位和径流数据
+            waterlevel_ds = camelsh_reader.read_ts_xrdataset(
                 gage_id_lst=batch,
                 t_range=time_range,
-                var_lst=[target_var]
+                var_lst=[StandardVariable.WATER_LEVEL]
+            )
+            flow_ds = camelsh_reader.read_ts_xrdataset(
+                gage_id_lst=batch,
+                t_range=time_range,
+                var_lst=[StandardVariable.STREAMFLOW]
             )
             
             # 转换为pandas格式检查
-            target_df = None
+            waterlevel_df = None
+            flow_df = None
             
-            if target_var in target_ds.data_vars:
-                target_df = target_ds[target_var].to_pandas().T
-                # 统一将列名转换为字符串，避免类型不匹配
-                target_df.columns = [str(col) for col in target_df.columns]
+            if StandardVariable.WATER_LEVEL in waterlevel_ds.data_vars:
+                waterlevel_df = waterlevel_ds[StandardVariable.WATER_LEVEL].to_pandas().T
             else:
-                print(f"\n警告: 数据集缺少{target_type}变量")
+                print(f"\n警告: 数据集缺少water_level变量")
                 for basin_id in batch:
-                    invalid_basins.append((basin_id, f"数据集缺少{target_type}变量"))
+                    invalid_basins.append((basin_id, "数据集缺少water_level变量"))
+                continue
+            
+            if StandardVariable.STREAMFLOW in flow_ds.data_vars:
+                flow_df = flow_ds[StandardVariable.STREAMFLOW].to_pandas().T
+            else:
+                print(f"\n警告: 数据集缺少streamflow变量")
+                for basin_id in batch:
+                    invalid_basins.append((basin_id, "数据集缺少streamflow变量"))
                 continue
             
             # 检查每个流域的数据
             for basin_id in batch:
-                target_valid = False
+                waterlevel_valid = False
+                flow_valid = False
                 reasons = []
                 
-                # 统一转换为字符串进行比较
-                basin_id_str = str(basin_id)
-                
-                # 检查目标数据
-                if basin_id_str in target_df.columns:
-                    target_data = target_df[basin_id_str]
-                    if target_data.notna().any():
-                        target_valid_ratio = target_data.notna().sum() / len(target_data)
-                        if target_valid_ratio >= min_valid_ratio:
-                            target_valid = True
+                # 检查水位数据
+                if basin_id in waterlevel_df.columns:
+                    wl_data = waterlevel_df[basin_id]
+                    if wl_data.notna().any():
+                        wl_valid_ratio = wl_data.notna().sum() / len(wl_data)
+                        if wl_valid_ratio >= min_valid_ratio:
+                            waterlevel_valid = True
                         else:
-                            reasons.append(f"{target_type}有效比例过低: {target_valid_ratio:.2%}")
+                            reasons.append(f"水位有效比例过低: {wl_valid_ratio:.2%}")
                     else:
-                        reasons.append(f"{target_type}数据全为NaN")
+                        reasons.append("水位数据全为NaN")
                 else:
-                    # 尝试查找相似的列名（调试信息）
-                    available_cols = list(target_df.columns)
-                    reasons.append(f"{target_type}数据集中不存在 (可用列: {available_cols[:5]}...)")
+                    reasons.append("水位数据集中不存在")
                 
-                # 只有数据有效才加入有效列表
-                if target_valid:
-                    valid_basins.append(basin_id_str)  # 统一使用字符串
+                # 检查径流数据
+                if basin_id in flow_df.columns:
+                    flow_data = flow_df[basin_id]
+                    if flow_data.notna().any():
+                        flow_valid_ratio = flow_data.notna().sum() / len(flow_data)
+                        if flow_valid_ratio >= min_valid_ratio:
+                            flow_valid = True
+                        else:
+                            reasons.append(f"径流有效比例过低: {flow_valid_ratio:.2%}")
+                    else:
+                        reasons.append("径流数据全为NaN")
+                else:
+                    reasons.append("径流数据集中不存在")
+                
+                # 只有两种数据都有效才加入有效列表
+                if waterlevel_valid and flow_valid:
+                    valid_basins.append(basin_id)
                 else:
                     reason_str = "; ".join(reasons) if reasons else "未知原因"
-                    invalid_basins.append((basin_id_str, reason_str))
-                
+                    invalid_basins.append((basin_id, reason_str))
                     
         except Exception as e:
             # 如果加载失败，这批流域都无效
@@ -257,7 +1155,7 @@ def filter_basins_with_valid_data(camelsh_reader, basin_list, time_range, target
                 invalid_basins.append((basin_id, f"加载失败: {str(e)[:50]}"))
     
     print(f"\n验证完成:")
-    print(f"  有效流域（有有效{target_type}数据）: {len(valid_basins)} 个")
+    print(f"  有效流域（同时有有效水位和径流数据）: {len(valid_basins)} 个")
     print(f"  无效流域: {len(invalid_basins)} 个")
     
     if len(invalid_basins) > 0 and len(invalid_basins) <= 10:
@@ -268,922 +1166,20 @@ def filter_basins_with_valid_data(camelsh_reader, basin_list, time_range, target
     return valid_basins
 
 
-class SingleTaskDataset(Dataset):
-    """单任务数据集类，用于加载单一目标变量数据（径流或水位）"""
-
-    def __init__(
-        self,
-        basins: list,
-        dates: list,
-        data_attr: pd.DataFrame,
-        data_forcing: xr.Dataset,
-        data_target: pd.DataFrame,  # 目标数据（径流或水位）
-        target_type: str,  # "flow" 或 "waterlevel"
-        loader_type: str = "train",
-        seq_length: int = 100,
-        means: dict = None,
-        stds: dict = None,
-        data_aux: pd.DataFrame = None,  # 辅助数据（用于筛选时间段）
-    ):
-        """
-        初始化单任务数据集
-
-        Parameters
-        ----------
-        basins : list
-            流域ID列表
-        dates : list
-            时间范围 [start_date, end_date]
-        data_attr : pd.DataFrame
-            流域属性数据
-        data_forcing : xr.Dataset
-            气象强迫数据（来自CAMELS）
-        data_target : pd.DataFrame
-            目标数据（径流或水位），格式：index为时间，columns为流域ID
-        target_type : str
-            目标类型 "flow" 或 "waterlevel"
-        loader_type : str, optional
-            数据集类型 "train", "valid", "test"
-        seq_length : int, optional
-            输入序列长度
-        means : dict, optional
-            归一化均值字典
-        stds : dict, optional
-            归一化标准差字典
-        data_aux : pd.DataFrame, optional
-            辅助数据（用于确保单任务和多任务模型使用相同的时间段）
-            如果提供，则只使用target和aux都非NaN的时间段
-        """
-        super(SingleTaskDataset, self).__init__()
-        if loader_type not in ["train", "valid", "test"]:
-            raise ValueError(
-                " 'loader_type' must be one of 'train', 'valid' or 'test' "
-            )
-        if target_type not in ["flow", "waterlevel"]:
-            raise ValueError(
-                " 'target_type' must be 'flow' or 'waterlevel' "
-            )
-        
-        self.loader_type = loader_type
-        self.target_type = target_type
-        # 确保basins列表中的元素都是字符串类型，以保持一致性
-        self.basins = [str(b) for b in basins]
-        self.dates = dates
-        self.seq_length = seq_length
-        self.means = means
-        self.stds = stds
-
-        self.data_attr = data_attr
-        self.data_forcing = data_forcing
-        self.data_target = data_target
-        self.data_aux = data_aux  # 辅助数据（另一个目标变量）
-
-        self.time_index = {}
-
-        # 加载和预处理数据
-        self._load_data()
-
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, item: int):
-        basin, time_idx = self.lookup_table[item]
-        seq_length = self.seq_length
-        
-        # time_idx 是真实 datetime，需要找到整数位置
-        # 注意：强迫数据和目标数据可能有不同的时间索引（3小时 vs 小时）
-        # 需要在强迫数据的时间索引中查找
-        if hasattr(self, 'forcing_time_index') and self.forcing_time_index is not None:
-            # 使用强迫数据的时间索引
-            if time_idx not in self.forcing_time_index:
-                # 如果时间索引不存在，找最近的
-                closest_idx = self.forcing_time_index.get_indexer([time_idx], method='nearest')[0]
-                start_pos = closest_idx
-            else:
-                start_pos = self.forcing_time_index.get_loc(time_idx)
-        else:
-            # 降级方案：使用目标数据的时间索引
-            start_pos = self.data_target.index.get_loc(time_idx)
-        
-        x = self.x[basin][start_pos : start_pos + seq_length]
-        
-        # 检查强迫数据维度
-        if len(x) == 0:
-            print(f"[错误] 样本 {item}: 强迫数据x为空")
-            print(f"  流域: {basin}, 时间索引: {time_idx}")
-            print(f"  start_pos: {start_pos}, seq_length: {seq_length}")
-            print(f"  强迫数据总长度: {len(self.x[basin])}")
-            raise ValueError("强迫数据x为空")
-        
-        # 检查强迫数据
-        if np.isnan(x).any():
-            print(f"[错误] 样本 {item}: 强迫数据x包含NaN")
-            print(f"  流域: {basin}, 时间索引: {time_idx}")
-            print(f"  x形状: {x.shape}")
-            raise ValueError("强迫数据x包含NaN")
-        
-        c = self.c.loc[basin].values
-        
-        # 检查属性数据
-        if np.isnan(c).any():
-            print(f"[错误] 样本 {item}: 属性数据c包含NaN")
-            print(f"  流域: {basin}")
-            print(f"  c值: {c}")
-            raise ValueError("属性数据c包含NaN")
-        
-        c = np.tile(c, (seq_length, 1))
-        xc = np.concatenate((x, c), axis=1)
-        
-        # 获取目标值（序列最后一天的值）
-        # 注意：目标数据使用原始时间索引，需要从lookup_table中获取的time_idx开始计算
-        # 找到目标数据中对应的位置
-        target_time_idx = time_idx
-        if target_time_idx in self.data_target.index:
-            target_pos = self.data_target.index.get_loc(target_time_idx)
-            # 目标值对应的是序列结束时刻
-            # 由于强迫数据是3小时分辨率，需要找到对应的目标数据位置
-            # 使用lookup_table中的time_idx加上(seq_length-1)*3小时
-            end_time = target_time_idx + pd.Timedelta(hours=(seq_length - 1) * 3)
-            if end_time in self.data_target.index:
-                target_end_pos = self.data_target.index.get_loc(end_time)
-                y = self.y[basin][target_end_pos]
-            else:
-                # 如果精确时间不存在，找最近的
-                nearest_idx = self.data_target.index.get_indexer([end_time], method='nearest')[0]
-                y = self.y[basin][nearest_idx]
-        else:
-            # 如果时间索引不存在，找最近的
-            nearest_idx = self.data_target.index.get_indexer([target_time_idx], method='nearest')[0]
-            end_time = target_time_idx + pd.Timedelta(hours=(seq_length - 1) * 3)
-            nearest_end_idx = self.data_target.index.get_indexer([end_time], method='nearest')[0]
-            y = self.y[basin][nearest_end_idx]
-        
-        # 最终NaN检查
-        if np.isnan(xc).any():
-            print(f"[错误] 样本 {item}: 输入特征包含NaN")
-            print(f"  流域: {basin}, 时间索引: {time_idx}")
-            raise ValueError("输入特征包含NaN")
-        
-        if np.isnan(y):
-            print(f"[错误] 样本 {item}: 目标值包含NaN")
-            print(f"  流域: {basin}, 时间索引: {time_idx}")
-            print(f"  目标时间: {end_time}")
-            raise ValueError("目标值包含NaN")
-        
-        return torch.from_numpy(xc).float(), torch.from_numpy(
-            np.array([y], dtype=np.float32)
-        )
-
-    def _load_data(self):
-        """加载和预处理数据 - 按流域独立归一化"""
-        if self.loader_type == "train":
-            train_mode = True
-            # 计算归一化参数
-            self.means = {}
-            self.stds = {}
-        else:
-            train_mode = False
-
-        # 准备数据字典
-        self.x = {}  # 强迫数据
-        self.y = {}  # 目标数据
-
-        # 获取强迫变量名
-        forcing_vars = [var for var in self.data_forcing.data_vars]
-        print(f"强迫变量: {forcing_vars}")
-
-        # 训练模式下，先检查和处理原始数据中的NaN，然后计算统计量
-        if train_mode:
-            # 检查原始数据中的NaN
-            print("检查原始数据中的NaN...")
-            
-            # 检查强迫数据
-            # 对于 xarray Dataset，转换为数组后计算 NaN 数量
-            forcing_nan_count = int(self.data_forcing.isnull().to_array().sum().values)
-            print(f"强迫数据NaN统计: {forcing_nan_count}")
-            if forcing_nan_count > 0:
-                print(f"[警告] 强迫数据包含NaN值，将使用插值填充")
-                # 使用线性插值方法
-                self.data_forcing = self.data_forcing.interpolate_na(dim='time', method='linear')
-                # 如果还有NaN，用均值填充
-                remaining_nan = int(self.data_forcing.isnull().to_array().sum().values)
-                if remaining_nan > 0:
-                    self.data_forcing = self.data_forcing.fillna(self.data_forcing.mean())
-            
-            # 检查属性数据
-            attr_nan_count = self.data_attr.isnull().sum().sum()
-            if attr_nan_count > 0:
-                print(f"[警告] 属性数据包含 {attr_nan_count} 个NaN值，将使用均值填充")
-                numeric_cols = [col for col in self.data_attr.columns if col != 'gauge_id']
-                self.data_attr[numeric_cols] = self.data_attr[numeric_cols].fillna(self.data_attr[numeric_cols].mean())
-            
-            # ========== 修复：不要对目标数据做全局填充！==========
-            # 统一将列名转换为字符串
-            self.data_target.columns = [str(col) for col in self.data_target.columns]
-            
-            # 只检查NaN数量，不做任何填充！
-            # 后续在 _create_lookup_table 中会通过 dropna() 只使用有真实数据的时间点
-            target_nan_count = self.data_target.isnull().sum().sum()
-            total_values = self.data_target.size
-            valid_ratio = (total_values - target_nan_count) / total_values if total_values > 0 else 0
-            print(f"[信息] {self.target_type}数据统计:")
-            print(f"  - 总数据点: {total_values}")
-            print(f"  - 有效数据点: {total_values - target_nan_count} ({valid_ratio:.1%})")
-            print(f"  - NaN数据点: {target_nan_count} ({target_nan_count/total_values:.1%})")
-            print(f"  注意：NaN数据将被自动跳过，只使用真实观测数据进行训练")
-            
-            # 气象强迫数据的均值和标准差（全局）
-            df_mean_forcings = self.data_forcing.mean().to_pandas()
-            df_std_forcings = self.data_forcing.std().to_pandas()
-            
-            # 检查计算出的统计量
-            if df_mean_forcings.isnull().any() or df_std_forcings.isnull().any():
-                print("[错误] 强迫数据统计量包含NaN")
-                raise ValueError("强迫数据统计量包含NaN")
-            
-            self.means['forcing'] = df_mean_forcings
-            self.stds['forcing'] = df_std_forcings
-            
-            # 属性数据的均值和标准差（排除 gauge_id）
-            numeric_cols = [col for col in self.data_attr.columns if col != 'gauge_id']
-            numeric_attrs = self.data_attr[numeric_cols]
-            df_mean_attr = numeric_attrs.mean()
-            df_std_attr = numeric_attrs.std(ddof=0).fillna(0.0)
-            
-            # 检查计算出的统计量
-            if df_mean_attr.isnull().any():
-                print("[错误] 属性数据统计量均值包含NaN")
-                raise ValueError("属性数据统计量包含NaN")
-            
-            self.means['attr'] = df_mean_attr
-            self.stds['attr'] = df_std_attr
-            
-            # 目标数据的均值和标准差（每个流域独立计算）
-            target_mean = {}
-            target_std = {}
-            for basin in self.basins:
-                basin_str = str(basin)
-                if basin_str in self.data_target.columns:
-                    series = self.data_target[basin_str]
-                    target_mean[basin_str] = series.mean()
-                    target_std[basin_str] = series.std() if series.std() > 1e-6 else 1.0
-            
-            self.means[self.target_type] = target_mean
-            self.stds[self.target_type] = target_std
-            
-            # 最终NaN检查（只检查强迫数据和属性数据，目标数据允许有NaN）
-            # 对于 xarray Dataset，转换为数组后计算 NaN 数量
-            final_forcing_nan = int(self.data_forcing.isnull().to_array().sum().values)
-            final_attr_nan = self.data_attr[numeric_cols].isnull().sum().sum()
-            
-            if final_forcing_nan > 0 or final_attr_nan > 0:
-                print(f"[错误] 强迫/属性数据清洗后仍有NaN: 强迫={final_forcing_nan}, 属性={final_attr_nan}")
-                raise ValueError("强迫/属性数据清洗失败，仍存在NaN值")
-            else:
-                print("数据统计量计算完成")
-        else:
-            # 非训练模式也需要统一列名
-            self.data_target.columns = [str(col) for col in self.data_target.columns]
-
-        # 归一化处理
-        print("开始数据归一化...")
-        
-        # 检查哪些 basin 实际存在于数据中
-        available_basins_in_forcing = [str(b) for b in self.data_forcing.basin.values]
-        available_basins_in_target = [str(col) for col in self.data_target.columns]
-        
-        # 只保留在所有数据中都存在的 basin
-        valid_basins = []
-        for basin in self.basins:
-            basin_str = str(basin)
-            if basin_str in available_basins_in_forcing and basin_str in available_basins_in_target:
-                valid_basins.append(basin_str)
-            else:
-                missing_in = []
-                if basin_str not in available_basins_in_forcing:
-                    missing_in.append("强迫数据")
-                if basin_str not in available_basins_in_target:
-                    missing_in.append("目标数据")
-                print(f"[警告] 流域 {basin_str} 不在以下数据中: {', '.join(missing_in)}，将跳过")
-        
-        # 更新 self.basins 为有效的 basin 列表
-        self.basins = valid_basins
-        print(f"实际可用的流域数量: {len(self.basins)} 个")
-        
-        if len(self.basins) == 0:
-            raise ValueError("没有找到任何在所有数据中都存在的流域！")
-        
-        # 保存强迫数据的时间索引，用于后续查找
-        self.forcing_time_index = pd.DatetimeIndex(self.data_forcing.time.values)
-        
-        self.x = self._normalize_forcing(self.data_forcing)
-        
-        # 更新basins列表为实际归一化成功的流域
-        successfully_normalized_basins = list(self.x.keys())
-        if len(successfully_normalized_basins) < len(self.basins):
-            skipped_count = len(self.basins) - len(successfully_normalized_basins)
-            print(f"[信息] {skipped_count} 个流域因强迫数据问题被跳过")
-            self.basins = successfully_normalized_basins
-            print(f"归一化后实际可用的流域数量: {len(self.basins)} 个")
-        
-        if len(self.basins) == 0:
-            raise ValueError("归一化后没有任何可用流域！")
-        
-        print("强迫数据归一化完成")
-        self.c = self._normalize_attr(self.data_attr)
-        print("属性数据归一化完成")
-        
-        # 所有模式都需要归一化目标变量，保持一致性
-        self.y = self._normalize_target(self.data_target)
-        
-        # 同时保存原始数据用于评估
-        if not train_mode:
-            self.y_raw = self._dataframe_to_dict(self.data_target)
-        
-        self.train_mode = train_mode
-        self._create_lookup_table()
-
-
-    def _dataframe_to_dict(self, df):
-        """将DataFrame转换为字典格式，保持NaN不变"""
-        result = {}
-        for basin in self.basins:
-            if basin in df.columns:
-                values = df[basin].values
-                # 保持NaN不变，不做任何填充
-                # NaN时间点会在 _create_lookup_table 中被自动跳过
-                result[basin] = values
-        return result
-
-    def _normalize_forcing(self, data_forcing):
-        """归一化气象强迫数据 - 使用全局统计量"""
-        result = {}
-        
-        # 处理标准差为0的情况（避免除零错误）
-        std_values = self.stds['forcing'].values.copy()
-        zero_std_mask = std_values < 1e-8
-        if np.any(zero_std_mask):
-            print(f"警告：发现标准差接近0的强迫变量，将设为1避免除零错误")
-            std_values[zero_std_mask] = 1.0
-        
-        # 获取 data_forcing 中可用的 basin 列表，统一转换为字符串
-        available_basins_in_data = [str(b) for b in data_forcing.basin.values]
-        
-        for basin in self.basins:
-            basin_str = str(basin)
-            
-            # 检查 basin 是否在数据中
-            if basin_str not in available_basins_in_data:
-                print(f"[警告] 流域 {basin_str} 不在强迫数据中，跳过")
-                continue
-            
-            try:
-                basin_data = data_forcing.sel(basin=basin_str).to_array().to_numpy().T
-            except KeyError:
-                # 如果 sel 失败，尝试使用原始 basin 值
-                try:
-                    basin_data = data_forcing.sel(basin=basin).to_array().to_numpy().T
-                except KeyError:
-                    print(f"[警告] 流域 {basin_str} 无法从强迫数据中提取，跳过")
-                    continue
-            
-            # 检查原始数据是否包含NaN
-            if np.isnan(basin_data).any():
-                nan_count = np.isnan(basin_data).sum()
-                total_count = basin_data.size
-                nan_ratio = nan_count / total_count * 100
-                print(f"[警告] 流域 {basin_str} 强迫数据包含NaN (数量: {nan_count}/{total_count}, {nan_ratio:.1f}%)，跳过该流域")
-                continue
-            
-            normalized = (basin_data - self.means['forcing'].values) / std_values
-            
-            # 检查归一化后的数据是否包含NaN
-            if np.isnan(normalized).any():
-                print(f"[警告] 流域 {basin_str} 归一化后强迫数据包含NaN，跳过该流域")
-                continue
-            
-            result[basin_str] = normalized
-        return result
-
-    def _normalize_attr(self, data_attr):
-        """归一化属性数据（只处理数值列）- 使用全局统计量"""
-        # 分离 gauge_id 和数值列
-        gauge_ids = data_attr['gauge_id']
-        numeric_cols = [col for col in data_attr.columns if col != 'gauge_id']
-        numeric_attrs = data_attr[numeric_cols]
-        
-        # 检查是否有标准差为0的列
-        zero_std_mask = self.stds['attr'] < 1e-8
-        if zero_std_mask.any():
-            print(f"[警告] 发现标准差接近0的属性列: {self.stds['attr'][zero_std_mask].index.tolist()}")
-            # 对标准差为0的列，设置标准差为1（这样归一化后为0）
-            std_values = self.stds['attr'].copy()
-            std_values[zero_std_mask] = 1.0
-        else:
-            std_values = self.stds['attr']
-        
-        # 归一化数值列
-        normalized = (numeric_attrs - self.means['attr']) / std_values
-        
-        # 检查归一化后是否有NaN
-        if normalized.isnull().any().any():
-            print(f"[错误] 属性数据归一化后包含NaN")
-            raise ValueError("属性数据归一化后包含NaN")
-        
-        # 设置索引为 gauge_id，以便后续通过流域ID访问
-        normalized.index = gauge_ids
-        return normalized
-
-    def _normalize_target(self, data_target):
-        """归一化目标数据（按流域独立归一化）- 保持NaN不变"""
-        result = {}
-        # 统一将列名转换为字符串
-        data_target.columns = [str(col) for col in data_target.columns]
-        
-        for basin in self.basins:
-            basin_str = str(basin)
-            if basin_str not in data_target.columns:
-                print(f"[警告] 流域 {basin_str} 不在目标数据列中，跳过")
-                continue
-                
-            values = data_target[basin_str].values
-            
-            # 获取该流域的均值和标准差
-            if basin_str not in self.means.get(self.target_type, {}):
-                raise KeyError(f"流域 {basin_str} 的{self.target_type}归一化参数不存在")
-            mean = self.means[self.target_type][basin_str]
-            std = self.stds[self.target_type][basin_str]
-            
-            # 直接归一化，保持NaN不变（pandas会自动跳过NaN）
-            normalized = (values - mean) / std
-            
-            # NaN是正常的，因为不是所有时间点都有观测
-            # 这些NaN时间点会在 _create_lookup_table 中被 dropna() 自动跳过
-            
-            result[basin_str] = normalized
-        return result
-
-    def _create_lookup_table(self):
-        """
-        为每个流域独立构建滑窗索引，并按该流域自身完整时间范围做比例切分。
-
-        说明：
-        - 对每个流域，从归一化后的目标数据（self.y）中找出非NaN时间索引
-        - 如果提供了辅助数据（data_aux），则确保target和aux都非NaN
-        - 按 (TRAIN_RATIO, VALID_RATIO, TEST_RATIO) 进行时间顺序切分
-        - 在滑窗时，确保每个窗口内的数据是真正连续的（没有被NaN断开）
-        - **关键**：使用强迫数据的时间索引（3小时分辨率）作为基准
-        """
-        lookup = []
-        seq_length = self.seq_length
-
-        skipped_basins = []
-        basins_with_samples = []
-        basin_time_ranges = {}  # 记录每个流域的时间范围
-        
-        # 判断是否需要同时检查辅助数据
-        use_aux = self.data_aux is not None
-        if use_aux:
-            print(f"  注意：为确保与多任务模型公平对比，将同时检查flow和waterlevel数据")
-        
-        # 使用强迫数据的时间索引作为基准（3小时分辨率）
-        forcing_times = self.forcing_time_index
-        
-        for basin in tqdm(self.basins, desc=f"创建 {self.loader_type} 索引表", disable=False):
-            basin_str = str(basin)
-            if basin_str not in self.y:
-                skipped_basins.append(basin_str)
-                continue
-
-            # 找出在强迫数据时间范围内，目标数据非NaN的时间点
-            target_values = self.y[basin_str]
-            target_index = self.data_target.index
-            
-            # 找出目标数据非NaN的位置
-            target_valid_mask = ~np.isnan(target_values)
-            
-            # 如果提供了辅助数据，也要检查辅助数据
-            if use_aux:
-                if basin_str not in self.data_aux.columns:
-                    skipped_basins.append(basin_str)
-                    continue
-                aux_values = self.data_aux[basin_str].values
-                aux_valid_mask = ~np.isnan(aux_values)
-                # 两者都非NaN才是有效的
-                target_and_aux_valid = target_valid_mask & aux_valid_mask
-            else:
-                target_and_aux_valid = target_valid_mask
-            
-            # 获取目标数据中所有有效的时间索引
-            valid_target_times = set(target_index[target_and_aux_valid])
-            
-            # 找出强迫数据时间点中，对应的目标数据也有效的时间点
-            valid_forcing_times = []
-            for ft in forcing_times:
-                # 计算这个强迫数据时间点对应的目标时间范围
-                # 序列结束时刻
-                end_time = ft + pd.Timedelta(hours=(seq_length - 1) * 3)
-                # 检查结束时刻的目标数据是否有效
-                if end_time in valid_target_times:
-                    valid_forcing_times.append(ft)
-            
-            if len(valid_forcing_times) < 1:
-                skipped_basins.append(basin_str)
-                continue
-            
-            # 找出有效时间的起止
-            first_valid_time = valid_forcing_times[0]
-            last_valid_time = valid_forcing_times[-1]
-            
-            # 在强迫数据时间索引中找到位置
-            start_idx = forcing_times.get_loc(first_valid_time)
-            end_idx = forcing_times.get_loc(last_valid_time)
-            
-            # 计算时间跨度
-            total_span = end_idx - start_idx + 1
-            
-            # 按比例划分
-            train_end_idx = start_idx + int(total_span * TRAIN_RATIO)
-            valid_end_idx = start_idx + int(total_span * (TRAIN_RATIO + VALID_RATIO))
-            
-            # 根据loader_type确定范围
-            if self.loader_type == "train":
-                range_start_idx = start_idx
-                range_end_idx = train_end_idx
-            elif self.loader_type == "valid":
-                range_start_idx = train_end_idx
-                range_end_idx = valid_end_idx
-            else:  # "test"
-                range_start_idx = valid_end_idx
-                range_end_idx = end_idx + 1
-            
-            # 检查范围内是否有足够样本
-            if range_end_idx - range_start_idx < seq_length:
-                continue
-            
-            # 在该范围内滑窗
-            num_samples_this_basin = 0
-            for idx in range(range_start_idx, range_end_idx - seq_length + 1, WINDOW_STEP):
-                # 获取这个窗口的起始时间
-                window_start_time = forcing_times[idx]
-                # 计算结束时间
-                window_end_time = window_start_time + pd.Timedelta(hours=(seq_length - 1) * 3)
-                
-                # 检查结束时间的目标数据是否有效
-                if window_end_time in valid_target_times:
-                    lookup.append((basin_str, window_start_time))
-                    num_samples_this_basin += 1
-            
-            if num_samples_this_basin > 0:
-                basins_with_samples.append(basin_str)
-                # 记录该流域的时间范围信息
-                basin_time_ranges[basin_str] = {
-                    'first_valid': str(first_valid_time),
-                    'last_valid': str(last_valid_time),
-                    'total_valid_hours': len(valid_forcing_times),
-                    'loader_start': str(forcing_times[range_start_idx]),
-                    'loader_end': str(forcing_times[range_end_idx - 1]) if range_end_idx > 0 else str(forcing_times[-1]),
-                    'num_samples': num_samples_this_basin
-                }
-
-        self.lookup_table = {i: elem for i, elem in enumerate(lookup)}
-        self.num_samples = len(self.lookup_table)
-        print(f"\n{self.loader_type.upper()} 数据集统计:")
-        print(f"  - 总样本数: {self.num_samples}")
-        print(f"  - 有样本的流域数: {len(basins_with_samples)}/{len(self.basins)}")
-        if skipped_basins:
-            print(f"  - 跳过的流域（不在数据中）: {len(skipped_basins)} 个")
-            if len(skipped_basins) <= 10:
-                print(f"    示例: {skipped_basins}")
-        
-        # 打印前几个流域的时间范围信息（验证每个流域有自己的时间区间）
-        if basin_time_ranges and self.loader_type == "train":  # 只在训练集时打印，避免重复
-            print(f"\n  各流域时间范围示例 (前5个):")
-            for i, (basin_id, info) in enumerate(list(basin_time_ranges.items())[:5]):
-                print(f"    流域 {basin_id}:")
-                print(f"      完整数据范围: {info['first_valid']} 到 {info['last_valid']} (共{info['total_valid_hours']}个3小时步)")
-                print(f"      {self.loader_type.upper()}期范围: {info['loader_start']} 到 {info['loader_end']}")
-                print(f"      生成样本数: {info['num_samples']}")
-        
-        if self.num_samples == 0:
-            raise ValueError(f"{self.loader_type} 数据集没有生成任何样本！请检查数据有效性。")
-
-    def get_means(self):
-        return self.means
-
-    def get_stds(self):
-        return self.stds
-
-    def local_denormalization(self, feature, basin):
-        """按流域反归一化"""
-        # 确保basin是字符串类型
-        basin = str(basin)
-        
-        if basin not in self.means.get(self.target_type, {}):
-            raise KeyError(f"流域 {basin} 的{self.target_type}归一化参数不存在")
-        mean = self.means[self.target_type][basin]
-        std = self.stds[self.target_type][basin]
-        return feature * std + mean
+if __name__ == "__main__":
+    set_random_seed(1234)
+    configure_chinese_font()
     
-    def get_raw_targets(self):
-        """获取原始目标数据（仅测试模式）"""
-        if hasattr(self, 'y_raw'):
-            return self.y_raw
-        else:
-            # 如果没有原始数据，使用反归一化
-            raw_data = {}
-            for basin in self.y:
-                raw_data[basin] = self.local_denormalization(self.y[basin], basin)
-            return raw_data
-
-
-class SingleTaskLSTM(nn.Module):
-    """单任务LSTM网络，预测径流或水位"""
-
-    def __init__(
-        self, 
-        input_size: int, 
-        hidden_size: int, 
-        dropout_rate: float = 0.0
-    ):
-        """
-        构建单任务LSTM模型
-
-        Parameters
-        ----------
-        input_size : int
-            输入特征维度
-        hidden_size : int
-            LSTM隐藏层大小
-        dropout_rate : float, optional
-            Dropout比率
-        """
-        super(SingleTaskLSTM, self).__init__()
-
-        # LSTM层
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=2,
-            bias=True,
-            batch_first=True,
-        )
-        self.dropout = nn.Dropout(p=dropout_rate)
-        
-        # 输出层
-        self.fc = nn.Linear(in_features=hidden_size, out_features=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        前向传播
-
-        Returns
-        -------
-        torch.Tensor
-            预测值
-        """
-        output, (h_n, c_n) = self.lstm(x)
-
-        # 使用最后一层的隐藏状态
-        hidden = self.dropout(h_n[-1, :, :])
-        
-        # 预测
-        pred = self.fc(hidden)
-        
-        return pred
-
-
-def train_epoch(model, optimizer, loader, loss_func, epoch, target_type):
-    """训练一个epoch"""
-    model.train()
-    pbar = tqdm(loader)
-    pbar.set_description(f"Epoch {epoch}")
-    
-    epoch_loss = 0.0
-    
-    for batch_idx, (xs, ys) in enumerate(pbar):
-        # 检查输入数据
-        if torch.isnan(xs).any() or torch.isnan(ys).any():
-            print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 输入数据包含NaN")
-            raise ValueError("输入数据包含NaN")
-        
-        optimizer.zero_grad()
-        xs, ys = xs.to(DEVICE), ys.to(DEVICE)
-        
-        # 获取模型预测
-        try:
-            pred = model(xs)
-        except Exception as e:
-            print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 前向传播失败 - {e}")
-            raise e
-        
-        # 检查预测结果
-        if torch.isnan(pred).any():
-            print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 预测结果包含NaN")
-            raise ValueError("预测结果包含NaN")
-        
-        # 计算损失
-        loss = loss_func(pred, ys)
-        
-        # 检查损失
-        if torch.isnan(loss):
-            print(f"[错误] Epoch {epoch}, 批次 {batch_idx}: 损失包含NaN")
-            raise ValueError("损失包含NaN")
-        
-        # 反向传播
-        loss.backward()
-        
-        # 梯度裁剪防止梯度爆炸
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
-        optimizer.step()
-        
-        # 累计损失
-        epoch_loss += loss.item()
-        
-        # 更新进度条
-        pbar.set_postfix_str(f"Loss: {loss.item():.4f}")
-    
-    # 检查epoch平均损失
-    avg_loss = epoch_loss / len(loader)
-    
-    if np.isnan(avg_loss):
-        print(f"[错误] Epoch {epoch}: 平均损失包含NaN")
-        raise ValueError("平均损失包含NaN")
-    
-    return avg_loss
-
-
-def eval_model(model, loader, target_type):
-    """评估模型：按流域分组返回观测和预测结果（按时间排序）"""
-    model.eval()
-    
-    # 按流域存放结果：key = basin（流域ID），value = list of (time, obs, pred)
-    obs_by_basin = {}
-    preds_by_basin = {}
-    times_by_basin = {}
-    sample_offset = 0
-    
-    with torch.no_grad():
-        for xs, ys in tqdm(loader, desc="评估中"):
-            batch_size = xs.size(0)
-            xs = xs.to(DEVICE)
-            pred = model(xs)
-            
-            # 统一搬到 CPU + numpy，方便后面处理
-            ys_np = ys.numpy().squeeze()  # [batch]
-            pred_np = pred.cpu().numpy().squeeze()  # [batch]
-            
-            # 有可能 squeeze 后变成标量，统一处理成一维
-            if pred_np.ndim == 0:
-                pred_np = pred_np.reshape(1)
-            if ys_np.ndim == 0:
-                ys_np = ys_np.reshape(1)
-            
-            # 获取对应的流域ID和时间
-            dataset = loader.dataset
-            
-            for i in range(batch_size):
-                # 从lookup_table获取basin和时间信息
-                sample_idx = sample_offset + i
-                if sample_idx < len(dataset.lookup_table):
-                    basin, time_idx = dataset.lookup_table[sample_idx]
-                    b = str(basin)
-                    
-                    if b not in obs_by_basin:
-                        obs_by_basin[b] = []
-                        preds_by_basin[b] = []
-                        times_by_basin[b] = []
-                    
-                    obs_by_basin[b].append(ys_np[i])
-                    preds_by_basin[b].append(pred_np[i])
-                    times_by_basin[b].append(time_idx)
-            
-            sample_offset += batch_size
-    
-    # 按时间排序后转成 numpy 数组
-    sorted_obs_by_basin = {}
-    sorted_preds_by_basin = {}
-
-    for b in obs_by_basin.keys():
-        # 按时间排序
-        times = np.array(times_by_basin[b])
-        order = np.argsort(times)
-
-        sorted_obs_by_basin[b] = np.array(obs_by_basin[b])[order]
-        sorted_preds_by_basin[b] = np.array(preds_by_basin[b])[order]
-
-    return sorted_obs_by_basin, sorted_preds_by_basin
-
-
-def _target_label(target_type: str) -> str:
-    return "径流" if target_type == "flow" else "水位"
-
-
-def plot_training_curves(train_losses, val_nses, target_type):
-    """绘制训练损失与验证集NSE曲线"""
-    target_label = _target_label(target_type)
-    fig, axes = plt.subplots(1, 2, figsize=(14, 4))
-
-    axes[0].plot(train_losses)
-    axes[0].set_title(f"{target_label}模型训练损失")
-    axes[0].set_xlabel("轮次")
-    axes[0].set_ylabel("损失")
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(val_nses, label="验证集 NSE")
-    axes[1].set_title(f"{target_label}模型验证集NSE")
-    axes[1].set_xlabel("轮次")
-    axes[1].set_ylabel("NSE")
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend()
-
-    plt.tight_layout()
-    plt.savefig(
-        f"single_task_{target_type}_training_curves.png",
-        dpi=300,
-        bbox_inches="tight",
-    )
-
-
-def plot_test_predictions(results, target_type):
-    """绘制测试集预测图"""
-    target_label = _target_label(target_type)
-    obs = results["obs"]
-    preds = results["pred"]
-    dates = results["dates"]
-    nse_per_basin = results["nse_per_basin"]
-
-    for basin in obs:
-        if basin not in preds or basin not in dates:
-            continue
-        if obs[basin].size == 0 or preds[basin].size == 0:
-            continue
-
-        fig, axes = plt.subplots(2, 1, figsize=(14, 8))
-
-        axes[0].plot(dates[basin], obs[basin], label="观测值", alpha=0.7)
-        axes[0].plot(dates[basin], preds[basin], label="预测值", alpha=0.7)
-        axes[0].legend()
-        axes[0].set_title(
-            f"流域 {basin} - {target_label}预测 (测试集 NSE: {nse_per_basin.get(basin, float('nan')):.3f})"
-        )
-        axes[0].set_ylabel(target_label)
-        axes[0].grid(True, alpha=0.3)
-
-        axes[1].scatter(obs[basin], preds[basin], alpha=0.6, s=8)
-        min_val = min(obs[basin].min(), preds[basin].min())
-        max_val = max(obs[basin].max(), preds[basin].max())
-        axes[1].plot([min_val, max_val], [min_val, max_val], "r--")
-        axes[1].set_xlabel(f"观测{target_label}")
-        axes[1].set_ylabel(f"预测{target_label}")
-        axes[1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        plt.savefig(
-            f"single_task_{target_type}_results_{basin}.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-
-
-def train_single_task_model(target_type="flow", num_epochs=None):
-    """
-    训练单任务模型
-    
-    Parameters
-    ----------
-    target_type : str
-        目标类型 "flow" 或 "waterlevel"
-    num_epochs : int
-        训练轮数
-    """
-    print(f"\n=== 开始训练单任务{target_type}模型 ===")
+    # 打印设备信息
+    print_device_info()
     
     # 导入配置
     from config import (
-        CAMELSH_DATA_PATH,
-        FORCING_VARIABLES,
-        ATTRIBUTE_VARIABLES,
-        VALID_WATER_LEVEL_BASINS,
-        NUM_BASINS,
-        SEQUENCE_LENGTH,
-        BATCH_SIZE,
-        TRAIN_START,
-        TRAIN_END,
-        VALID_START,
-        VALID_END,
-        TEST_START,
-        TEST_END,
-        EPOCHS,
-        LEARNING_RATE,
-        IMAGES_SAVE_PATH,
-        REPORTS_SAVE_PATH,
-        MODEL_SAVE_PATH,
+        CAMELSH_DATA_PATH, NUM_BASINS, SEQUENCE_LENGTH, BATCH_SIZE, EPOCHS,
+        TRAIN_START, TRAIN_END, VALID_START, VALID_END, TEST_START, TEST_END,
+        FORCING_VARIABLES, ATTRIBUTE_VARIABLES,
+        IMAGES_SAVE_PATH, REPORTS_SAVE_PATH, MODEL_SAVE_PATH
     )
-    
-    if num_epochs is None:
-        num_epochs = EPOCHS
     
     # 创建输出文件夹
     import os
@@ -1191,16 +1187,9 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     os.makedirs(REPORTS_SAVE_PATH, exist_ok=True)
     os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
     
-    # 设置随机种子
-    set_random_seed(1234)
-    
-    # 模型参数
-    HIDDEN_SIZE = 64
-    DROPOUT_RATE = 0.2
-    learning_rate = LEARNING_RATE
-    batch_size = BATCH_SIZE
-    sequence_length = SEQUENCE_LENGTH
-    num_basins = NUM_BASINS
+    # 从文件读取有水位数据的流域列表
+    print("\n正在从文件读取有水位数据的流域列表...")
+    VALID_WATER_LEVEL_BASINS = load_waterlevel_basins_from_file("valid_waterlevel_basins.txt")
     
     # ==================== 1. 加载CAMELSH数据 ====================
     print("\n正在加载CAMELSH数据...")
@@ -1231,48 +1220,25 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     print(f"数据集默认时间范围: {default_range}")
     print(f"将按比例划分时间序列: 训练 {TRAIN_RATIO:.0%}, 验证 {VALID_RATIO:.0%}, 测试 {TEST_RATIO:.0%}")
     
-    # 尝试从文件读取有目标数据的流域列表
-    candidate_basins = None
-    try:
-        print("\n正在从文件读取有目标数据的流域列表...")
-        candidate_basins = load_waterlevel_basins_from_file("86basin_ids.txt")
-        print(f"从文件读取了 {len(candidate_basins)} 个候选流域")
-    except (FileNotFoundError, ValueError) as e:
-        print(f"无法从文件读取流域列表: {e}")
-        print("将从所有可用流域中自动筛选...")
-        # 如果文件不存在或读取失败，使用所有可用流域
-        candidate_basins = [str(b) for b in basin_ids]
-        print(f"使用所有可用流域作为候选: {len(candidate_basins)} 个")
-    
-    # 如果从文件读取的流域太少，补充使用所有可用流域
-    if candidate_basins and len(candidate_basins) < NUM_BASINS:
-        print(f"\n从文件读取的流域数量 ({len(candidate_basins)}) 少于请求的 {NUM_BASINS} 个")
-        print("将从所有可用流域中补充候选...")
-        all_basins = [str(b) for b in basin_ids]
-        # 合并并去重
-        combined_basins = list(dict.fromkeys(candidate_basins + all_basins))
-        candidate_basins = combined_basins
-        print(f"合并后的候选流域数量: {len(candidate_basins)} 个")
-    
-    # 验证流域：从候选流域列表中，过滤出有有效目标数据的流域
-    print(f"\n开始验证候选流域的{target_type}数据有效性...")
-    print(f"候选流域数量: {len(candidate_basins)}")
+    # 验证流域：从文件读取的流域列表中，过滤出同时有有效水位和径流数据的流域
+    # 使用训练时间范围来验证数据有效性（需要足够的流域数量，所以先验证更多候选）
+    print(f"\n从文件中读取了 {len(VALID_WATER_LEVEL_BASINS)} 个候选流域")
     
     # 验证流域：需要检查足够多的候选流域以确保有足够的有效流域
-    max_candidates = min(len(candidate_basins), max(NUM_BASINS * 3, 200))
+    # 考虑到一些流域可能全为NaN或只有一种数据有效，检查更多候选（最多检查3倍数量，或全部候选）
+    max_candidates = min(len(VALID_WATER_LEVEL_BASINS), max(NUM_BASINS * 3, 200))
     print(f"将检查前 {max_candidates} 个候选流域以确保找到足够的有效流域...")
     
     validated_basins = filter_basins_with_valid_data(
         camelsh_reader=camelsh_reader,
-        basin_list=candidate_basins,
+        basin_list=VALID_WATER_LEVEL_BASINS,
         time_range=default_range,  # 使用完整时间范围检查数据有效性
-        target_type=target_type,
         max_basins_to_check=max_candidates,
         min_valid_ratio=0.1
     )
     
     if len(validated_basins) == 0:
-        raise ValueError(f"未找到任何有有效{target_type}数据的流域！请检查数据文件。")
+        raise ValueError("未找到任何同时有有效水位和径流数据的流域！请检查数据文件。")
     
     if len(validated_basins) < NUM_BASINS:
         print(f"\n警告: 只找到了 {len(validated_basins)} 个有效流域，少于请求的 {NUM_BASINS} 个")
@@ -1281,7 +1247,7 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     # 选择前NUM_BASINS个有效流域（或全部有效流域，如果不足NUM_BASINS个）
     chosen_basins = validated_basins[:NUM_BASINS]
     print(f"\n最终选择的流域 ({len(chosen_basins)} 个): {chosen_basins}")
-    print(f"注意：这些流域都经过验证，有有效的{target_type}数据（不全为NaN，有效数据比例≥10%）")
+    print(f"注意：这些流域都经过验证，同时有有效的水位和径流数据（不全为NaN，有效数据比例≥10%）")
     
     # ==================== 3. 选择特征变量 ====================
     # 将配置文件中的字符串转换为StandardVariable
@@ -1307,7 +1273,7 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     print(f"属性数据形状: {attrs.dims}")
     print(f"属性数据变量: {list(attrs.data_vars.keys())}")
     
-    # 准备气象强迫数据 - 使用改进的读取器
+    # 准备气象强迫数据 - 使用改进的读取器（完整时间范围，用于按比例切分）
     print("\n正在加载气象强迫数据（完整时间范围，用于按比例切分）...")
     
     # 分离降雨和其他气象变量
@@ -1319,10 +1285,10 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     # 从CAMELSH加载非降雨气象变量
     if chosen_forcing_vars_no_precip:
         forcings_ds_no_precip = camelsh_reader.read_ts_xrdataset(
-            gage_id_lst=chosen_basins,
-            t_range=default_range,
+        gage_id_lst=chosen_basins,
+        t_range=default_range,
             var_lst=chosen_forcing_vars_no_precip
-        )
+    )
         print(f"非降雨气象数据形状: {forcings_ds_no_precip.dims}")
         print(f"非降雨气象数据变量: {list(forcings_ds_no_precip.data_vars.keys())}")
     else:
@@ -1349,45 +1315,43 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     print(f"最终气象数据形状: {forcings_ds.dims}")
     print(f"最终气象数据变量: {list(forcings_ds.data_vars.keys())}")
     
-    # ==================== 4. 加载目标数据 ====================
-    # 为了公平对比，单任务模型也要同时加载flow和waterlevel数据
-    # 确保使用的是两者都存在的时间段
-    print(f"\n正在从CAMELSH数据集加载目标数据...")
-    print(f"注意：为了与多任务模型公平对比，将同时加载flow和waterlevel数据")
-    print(f"      单任务模型只在两者都有数据的时间段上训练/测试")
+    # ==================== 4. 加载径流和水位数据 ====================
+    print("\n正在从CAMELSH数据集加载径流和水位数据...")
     
-    # 加载flow数据
-    print("加载flow数据...")
+    # 使用改进的读取器加载完整时间范围上的径流和水位数据
+    print("加载径流数据（完整时间范围，用于按比例切分）...")
     flow_ds = camelsh_reader.read_ts_xrdataset(
         gage_id_lst=chosen_basins,
         t_range=default_range,
         var_lst=[StandardVariable.STREAMFLOW]
     )
+    
+    print("加载水位数据（完整时间范围，用于按比例切分）...")
+    try:
+        waterlevel_ds = camelsh_reader.read_ts_xrdataset(
+            gage_id_lst=chosen_basins,
+            t_range=default_range,
+            var_lst=[StandardVariable.WATER_LEVEL]
+        )
+    except Exception as e:
+        print(f"警告: 无法加载水位数据: {e}")
+        print("将使用模拟水位数据进行演示...")
+        waterlevel_ds = flow_ds.copy()
+        if StandardVariable.STREAMFLOW in waterlevel_ds.data_vars:
+            flow_data = waterlevel_ds[StandardVariable.STREAMFLOW]
+            water_level_data = flow_data * 0.1 + np.random.normal(0, 0.01, flow_data.shape)
+            waterlevel_ds[StandardVariable.WATER_LEVEL] = water_level_data
+            waterlevel_ds = waterlevel_ds.drop_vars([StandardVariable.STREAMFLOW])
+    
+    # 转换为 pandas DataFrame 格式以兼容现有代码
+    print("转换径流与水位数据格式...")
     full_flow = flow_ds[StandardVariable.STREAMFLOW].to_pandas().T
-    full_flow.columns = [str(col) for col in full_flow.columns]
+    full_waterlevel = waterlevel_ds[StandardVariable.WATER_LEVEL].to_pandas().T
     
-    # 加载waterlevel数据
-    print("加载waterlevel数据...")
-    wl_ds = camelsh_reader.read_ts_xrdataset(
-        gage_id_lst=chosen_basins,
-        t_range=default_range,
-        var_lst=[StandardVariable.WATER_LEVEL]
-    )
-    full_waterlevel = wl_ds[StandardVariable.WATER_LEVEL].to_pandas().T
-    full_waterlevel.columns = [str(col) for col in full_waterlevel.columns]
-    
-    # 确定当前任务的主要目标数据
-    if target_type == "flow":
-        full_target = full_flow
-        full_aux = full_waterlevel  # 辅助数据，用于筛选时间段
-    else:  # waterlevel
-        full_target = full_waterlevel
-        full_aux = full_flow  # 辅助数据，用于筛选时间段
-    
-    print(f"\n数据统计:")
-    print(f"  Flow数据形状: {full_flow.shape}")
-    print(f"  Waterlevel数据形状: {full_waterlevel.shape}")
-    print(f"  主目标({target_type})数据范围: {full_target.min().min():.3f} - {full_target.max().max():.3f}")
+    print(f"径流数据形状: {full_flow.shape}")
+    print(f"水位数据形状: {full_waterlevel.shape}")
+    print(f"径流数据范围: {full_flow.min().min():.3f} - {full_flow.max().max():.3f}")
+    print(f"水位数据范围: {full_waterlevel.min().min():.3f} - {full_waterlevel.max().max():.3f}")
     
     # ==================== 5. 创建数据集 ====================
     print("\n正在创建数据集...")
@@ -1406,68 +1370,68 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     print("属性DataFrame样本:")
     print(attrs_df.head())
     
-    # 训练数据集（在数据集内部按比例切分时间）
-    # 传入辅助数据，确保只使用flow和waterlevel都存在的时间段
-    ds_train = SingleTaskDataset(
+    # 训练数据集
+    ds_train = MultiTaskDataset(
         basins=chosen_basins,
         dates=default_range,
         data_attr=attrs_df,
         data_forcing=forcings_ds,
-        data_target=full_target,
-        target_type=target_type,
+        data_flow=full_flow,
+        data_waterlevel=full_waterlevel,
         loader_type="train",
         seq_length=sequence_length,
-        data_aux=full_aux,  # 辅助数据，用于筛选时间段
     )
     tr_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True)
     
     # 验证数据集
     means = ds_train.get_means()
     stds = ds_train.get_stds()
-    ds_val = SingleTaskDataset(
+    ds_val = MultiTaskDataset(
         basins=chosen_basins,
         dates=default_range,
         data_attr=attrs_df,
         data_forcing=forcings_ds,
-        data_target=full_target,
-        target_type=target_type,
+        data_flow=full_flow,
+        data_waterlevel=full_waterlevel,
         loader_type="valid",
         seq_length=sequence_length,
         means=means,
         stds=stds,
-        data_aux=full_aux,  # 辅助数据，用于筛选时间段
     )
     valid_batch_size = 1000
     val_loader = DataLoader(ds_val, batch_size=valid_batch_size, shuffle=False)
     
     # 测试数据集
-    ds_test = SingleTaskDataset(
+    ds_test = MultiTaskDataset(
         basins=chosen_basins,
         dates=default_range,
         data_attr=attrs_df,
         data_forcing=forcings_ds,
-        data_target=full_target,
-        target_type=target_type,
+        data_flow=full_flow,
+        data_waterlevel=full_waterlevel,
         loader_type="test",
         seq_length=sequence_length,
         means=means,
         stds=stds,
-        data_aux=full_aux,  # 辅助数据，用于筛选时间段
     )
     test_batch_size = 1000
     test_loader = DataLoader(ds_test, batch_size=test_batch_size, shuffle=False)
     
     # ==================== 6. 创建模型 ====================
-    print("\n正在创建单任务LSTM模型...")
+    print("\n正在创建多任务LSTM模型...")
     input_size = len(chosen_attrs_vars) + len(chosen_forcing_vars)
     hidden_size = 64  # LSTM隐藏层大小
     dropout_rate = 0.2  # Dropout率
     learning_rate = 1e-3  # 学习率
     
-    model = SingleTaskLSTM(
+    # 设置任务权重（可以根据需要调整）
+    task_weights = {'flow': 1.0, 'waterlevel': 1.0}
+    
+    model = MultiTaskLSTM(
         input_size=input_size, 
         hidden_size=hidden_size, 
-        dropout_rate=dropout_rate
+        dropout_rate=dropout_rate,
+        task_weights=task_weights
     ).to(DEVICE)
     
     # 使用权重衰减（L2正则化）
@@ -1481,36 +1445,39 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     
     # ==================== 7. 训练模型（带早停机制）====================
     print("\n开始训练...")
-    n_epochs = num_epochs
+    n_epochs = EPOCHS  # 训练轮数
     
     train_losses = []
-    val_nses = []
+    val_nses_flow = []
+    val_nses_waterlevel = []
     
     # 早停机制相关变量
-    best_val_nse = -float('inf')  # 最佳验证NSE
+    best_val_nse_avg = -float('inf')  # 最佳验证NSE（两个任务的平均）
     best_epoch = 0  # 最佳epoch
     patience = 5  # 容忍度：多少个epoch不提升就停止
     patience_counter = 0  # 计数器
     best_model_state = None  # 保存最佳模型状态
     
     print(f"早停机制已启用，patience = {patience}")
+    print("早停指标：两个任务NSE的平均值")
     
     for i in range(n_epochs):
         # 训练
-        train_loss = train_epoch(
-            model, optimizer, tr_loader, loss_func, i + 1, target_type
+        train_loss, train_loss_flow, train_loss_waterlevel = train_epoch(
+            model, optimizer, tr_loader, loss_func, i + 1
         )
         train_losses.append(train_loss)
         
-        # ===== 验证：按流域计算 NSE =====
-        obs_dict, preds_dict = eval_model(
-            model, val_loader, target_type
+        # ===== 验证：按流域计算 NSE，不再使用 reshape =====
+        obs_flow_dict, obs_waterlevel_dict, preds_flow_dict, preds_waterlevel_dict = eval_model(
+            model, val_loader
         )
         
-        nse_list = []
+        nse_flow_list = []
+        nse_waterlevel_list = []
         
         # 只处理实际有预测结果的流域（可能在创建索引表时某些流域被跳过了）
-        available_basins = set(preds_dict.keys())
+        available_basins = set(preds_flow_dict.keys())
         
         for basin in chosen_basins:
             b = str(basin)
@@ -1519,64 +1486,77 @@ def train_single_task_model(target_type="flow", num_epochs=None):
             if b not in available_basins:
                 continue
             
-            # 反归一化（按流域独立归一化）
-            pf = ds_val.local_denormalization(preds_dict[b], b)
-            of = ds_val.local_denormalization(obs_dict[b], b)
+            # 反归一化（注意：local_denormalization 是按变量全局均值/标准差来的）
+            pf = ds_val.local_denormalization(preds_flow_dict[b],b, variable="flow")
+            of = ds_val.local_denormalization(obs_flow_dict[b],b, variable="flow")
+            pw = ds_val.local_denormalization(preds_waterlevel_dict[b],b, variable="waterlevel")
+            ow = ds_val.local_denormalization(obs_waterlevel_dict[b],b, variable="waterlevel")
             
             # 计算每个流域的 NSE
-            nse_list.append(he.nse(pf, of))
+            nse_flow_list.append(he.nse(pf, of))
+            nse_waterlevel_list.append(he.nse(pw, ow))
         
-        current_val_nse = np.mean(nse_list)
-        val_nses.append(current_val_nse)
+        current_nse_flow = np.mean(nse_flow_list)
+        current_nse_waterlevel = np.mean(nse_waterlevel_list)
+        current_nse_avg = (current_nse_flow + current_nse_waterlevel) / 2
+        
+        val_nses_flow.append(current_nse_flow)
+        val_nses_waterlevel.append(current_nse_waterlevel)
         
         # 早停逻辑
-        if current_val_nse > best_val_nse:
-            best_val_nse = current_val_nse
+        if current_nse_avg > best_val_nse_avg:
+            best_val_nse_avg = current_nse_avg
             best_epoch = i + 1
             patience_counter = 0
             # 保存最佳模型状态
             best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             tqdm.write(
                 f"Epoch {i+1} - "
-                f"训练损失: {train_loss:.6f}, "
-                f"验证集 NSE: {current_val_nse:.4f} ✓ [新最佳]"
+                f"验证集 NSE (径流): {current_nse_flow:.4f}, "
+                f"NSE (水位): {current_nse_waterlevel:.4f}, "
+                f"平均: {current_nse_avg:.4f} ✓ [新最佳]"
             )
         else:
             patience_counter += 1
             tqdm.write(
                 f"Epoch {i+1} - "
-                f"训练损失: {train_loss:.6f}, "
-                f"验证集 NSE: {current_val_nse:.4f} "
+                f"验证集 NSE (径流): {current_nse_flow:.4f}, "
+                f"NSE (水位): {current_nse_waterlevel:.4f}, "
+                f"平均: {current_nse_avg:.4f} "
                 f"(无改进 {patience_counter}/{patience})"
             )
             
             # 如果超过patience，停止训练
             if patience_counter >= patience:
-                print(f"\n早停触发！验证集NSE已连续 {patience} 个epoch未改进")
-                print(f"最佳模型出现在 Epoch {best_epoch}，NSE = {best_val_nse:.4f}")
+                print(f"\n早停触发！平均验证集NSE已连续 {patience} 个epoch未改进")
+                print(f"最佳模型出现在 Epoch {best_epoch}，平均NSE = {best_val_nse_avg:.4f}")
                 print("加载最佳模型...")
                 # 加载最佳模型
                 model.load_state_dict({k: v.to(DEVICE) for k, v in best_model_state.items()})
                 # 截断训练曲线到实际训练的epoch数
                 train_losses = train_losses[:i+1]
-                val_nses = val_nses[:i+1]
+                val_nses_flow = val_nses_flow[:i+1]
+                val_nses_waterlevel = val_nses_waterlevel[:i+1]
                 break
 
     
     # ==================== 8. 测试模型 ====================
     print("\n在测试集上评估...")
-    obs_dict, preds_dict = eval_model(
-        model, test_loader, target_type
+    obs_flow_dict, obs_waterlevel_dict, preds_flow_dict, preds_waterlevel_dict = eval_model(
+        model, test_loader
     )
     
     # 反归一化 + 计算每个流域 NSE
     # 只处理实际有预测结果的流域（可能在创建索引表时某些流域被跳过了）
-    available_basins = set(preds_dict.keys())
+    available_basins = set(preds_flow_dict.keys())
     
     # 同时准备一个反归一化后的结果，用于画图和计算NSE
-    denorm_obs = {}
-    denorm_preds = {}
-    basin_nse = {}  # 流域到NSE的映射
+    denorm_obs_flow = {}
+    denorm_obs_waterlevel = {}
+    denorm_preds_flow = {}
+    denorm_preds_waterlevel = {}
+    basin_nse_flow = {}  # 流域到NSE的映射
+    basin_nse_waterlevel = {}  # 流域到NSE的映射
     evaluated_basins = []  # 实际评估的流域列表
     
     for basin in chosen_basins:
@@ -1586,23 +1566,34 @@ def train_single_task_model(target_type="flow", num_epochs=None):
         if b not in available_basins:
             continue
         
-        denorm_preds[b] = ds_test.local_denormalization(preds_dict[b], b)
-        denorm_obs[b] = ds_test.local_denormalization(obs_dict[b], b)
+        denorm_preds_flow[b] = ds_test.local_denormalization(
+            preds_flow_dict[b],b, variable="flow"
+        )
+        denorm_preds_waterlevel[b] = ds_test.local_denormalization(
+            preds_waterlevel_dict[b],b, variable="waterlevel"
+        )
+        denorm_obs_flow[b] = ds_test.local_denormalization(
+            obs_flow_dict[b],b, variable="flow"
+        )
+        denorm_obs_waterlevel[b] = ds_test.local_denormalization(
+            obs_waterlevel_dict[b],b, variable="waterlevel"
+        )
         
-        nse = he.nse(denorm_preds[b], denorm_obs[b])
+        nse_f = he.nse(denorm_preds_flow[b], denorm_obs_flow[b])
+        nse_w = he.nse(denorm_preds_waterlevel[b], denorm_obs_waterlevel[b])
         
-        basin_nse[b] = nse
+        basin_nse_flow[b] = nse_f
+        basin_nse_waterlevel[b] = nse_w
         evaluated_basins.append(b)
     
     print(f"\n测试集结果：")
     for b in evaluated_basins:
-        print(f"流域 {b}: NSE = {basin_nse[b]:.4f}")
+        print(f"流域 {b}:")
+        print(f"  径流 NSE: {basin_nse_flow[b]:.4f}")
+        print(f"  水位 NSE: {basin_nse_waterlevel[b]:.4f}")
     if evaluated_basins:
-        nse_test = np.mean(list(basin_nse.values()))
-        print(f"平均 NSE: {nse_test:.4f}")
-    else:
-        nse_test = np.nan
-        print("未找到有效评估结果")
+        print(f"平均 NSE (径流): {np.mean(list(basin_nse_flow.values())):.4f}")
+        print(f"平均 NSE (水位): {np.mean(list(basin_nse_waterlevel.values())):.4f}")
     
     # ==================== 9. 可视化结果 ====================
     print("\n正在生成可视化图表...")
@@ -1613,13 +1604,13 @@ def train_single_task_model(target_type="flow", num_epochs=None):
         hours=(sequence_length - 1) * 3  # 3小时分辨率
     )
     
-    target_label = _target_label(target_type)
-    
     for b in evaluated_basins:
         basin = b
         
-        of = denorm_obs[b]
-        pf = denorm_preds[b]
+        of = denorm_obs_flow[b]
+        pf = denorm_preds_flow[b]
+        ow = denorm_obs_waterlevel[b]
+        pw = denorm_preds_waterlevel[b]
         
         # 针对当前流域的序列长度生成时间轴
         # 使用3小时分辨率（freq='3H'）
@@ -1627,31 +1618,30 @@ def train_single_task_model(target_type="flow", num_epochs=None):
         
         fig, axes = plt.subplots(2, 1, figsize=(14, 8))
         
-        # 预测图
+        # 径流预测图
         axes[0].plot(date_range, of, label="观测值", alpha=0.7)
         axes[0].plot(date_range, pf, label="预测值", alpha=0.7)
         axes[0].legend()
-        axes[0].set_title(f"流域 {basin} - {target_label}预测 (测试集 NSE: {basin_nse[b]:.3f})")
-        axes[0].set_ylabel(target_label)
+        axes[0].set_title(f"流域 {basin} - 径流预测 (测试集 NSE: {basin_nse_flow[b]:.3f})")
+        axes[0].set_ylabel("径流 (mm/d)")
         axes[0].grid(True, alpha=0.3)
         
-        # 散点图
-        axes[1].scatter(of, pf, alpha=0.6, s=8)
-        min_val = min(of.min(), pf.min())
-        max_val = max(of.max(), pf.max())
-        axes[1].plot([min_val, max_val], [min_val, max_val], "r--")
-        axes[1].set_xlabel(f"观测{target_label}")
-        axes[1].set_ylabel(f"预测{target_label}")
+        # 水位预测图
+        axes[1].plot(date_range, ow, label="观测值", alpha=0.7)
+        axes[1].plot(date_range, pw, label="预测值", alpha=0.7)
+        axes[1].legend()
+        axes[1].set_title(f"流域 {basin} - 水位预测 (测试集 NSE: {basin_nse_waterlevel[b]:.3f})")
+        axes[1].set_xlabel("日期")
+        axes[1].set_ylabel("水位 (m)")
         axes[1].grid(True, alpha=0.3)
         
         plt.xticks(rotation=45)
         plt.tight_layout()
         
         # 保存图片
-        output_file = os.path.join(IMAGES_SAVE_PATH, f"single_task_{target_type}_results_basin_{basin}.png")
+        output_file = os.path.join(IMAGES_SAVE_PATH, f"multi_task_results_basin_{basin}.png")
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         print(f"已保存图片: {output_file}")
-        plt.close()  # 关闭图形，释放内存
 
     
     # 绘制训练曲线
@@ -1663,50 +1653,32 @@ def train_single_task_model(target_type="flow", num_epochs=None):
     axes[0].set_ylabel("损失")
     axes[0].grid(True, alpha=0.3)
     
-    axes[1].plot(val_nses, label=f"验证集 NSE")
-    axes[1].set_title(f"验证集 NSE ({target_label})")
+    axes[1].plot(val_nses_flow, label="径流 NSE")
+    axes[1].plot(val_nses_waterlevel, label="水位 NSE")
+    axes[1].set_title("验证集 NSE")
     axes[1].set_xlabel("Epoch")
     axes[1].set_ylabel("NSE")
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    training_curve_file = os.path.join(IMAGES_SAVE_PATH, f"single_task_{target_type}_training_curves.png")
+    training_curve_file = os.path.join(IMAGES_SAVE_PATH, "multi_task_training_curves.png")
     plt.savefig(training_curve_file, dpi=300, bbox_inches='tight')
     print(f"已保存训练曲线: {training_curve_file}")
-    plt.close()  # 关闭图形，释放内存
     
     # ==================== 10. 保存模型 ====================
     print("\n正在保存模型...")
-    model_path = os.path.join(MODEL_SAVE_PATH, f"single_task_{target_type}_model.pth")
+    model_path = os.path.join(MODEL_SAVE_PATH, 'multi_task_lstm_model.pth')
     torch.save({
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'means': means,
         'stds': stds,
-        'target_type': target_type,
-        'test_nse': nse_test,
+        'task_weights': task_weights,
+        'test_nse_flow': np.mean(list(basin_nse_flow.values())) if basin_nse_flow else 0.0,
+        'test_nse_waterlevel': np.mean(list(basin_nse_waterlevel.values())) if basin_nse_waterlevel else 0.0,
     }, model_path)
     print(f"模型已保存: {model_path}")
     
-    return model, means, stds, nse_test
+    print("\n训练完成！")
 
-
-if __name__ == "__main__":
-    set_random_seed(1234)
-    configure_chinese_font()
-    
-    # 打印设备信息
-    print_device_info()
-    
-    # 训练流量预测模型
-    print("训练流量预测模型...")
-    flow_model, flow_means, flow_stds, flow_nse = train_single_task_model("flow")
-    
-    # 训练水位预测模型
-    #print("\n训练水位预测模型...")
-    #waterlevel_model, wl_means, wl_stds, wl_nse = train_single_task_model("waterlevel")
-    
-    print(f"\n=== 单任务模型训练完成 ===")
-    print(f"流量模型NSE: {flow_nse:.4f}")
-    #print(f"水位模型NSE: {wl_nse:.4f}")
