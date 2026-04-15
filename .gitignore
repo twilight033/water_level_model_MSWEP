@@ -28,3 +28,5 @@ Thumbs.db
 
 config.py
 86basin_ids.txt
+CLAUDE.md
+.claude/
