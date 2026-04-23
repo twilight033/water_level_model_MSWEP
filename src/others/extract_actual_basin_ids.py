@@ -9,8 +9,9 @@ import sys
 from pathlib import Path
 from tqdm import tqdm
 
-# 添加项目路径
+# 添加项目路径（others/ 及其父目录 src/ 都需要，config.py 在 src/ 下）
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from improved_camelsh_reader import ImprovedCAMELSHReader
 from hydrodataset import StandardVariable
@@ -159,124 +160,125 @@ def filter_basins_with_valid_data(camelsh_reader, basin_list, time_range, max_ba
 
 
 def main():
-    """主函数"""
-    
+    """主函数：对CAMELSH全部流域筛选，有效数据比例阈值 >= 30%"""
+
+    import datetime
+    import pandas as pd
+    from pathlib import Path
+
+    MIN_VALID_RATIO = 0.3  # 有效数据比例阈值
+
     print("=" * 80)
-    print("提取 multi_task_lstm.py 实际运行时的流域ID列表")
+    print("CAMELSH 全量流域筛选（Q 和 h 有效比例均 >= 30%）")
     print("=" * 80)
-    
+
     # 导入配置
-    from config import CAMELSH_DATA_PATH, NUM_BASINS
-    
+    from config import CAMELSH_DATA_PATH
+
     print(f"\n配置信息:")
     print(f"  CAMELSH数据路径: {CAMELSH_DATA_PATH}")
-    print(f"  请求流域数量: {NUM_BASINS}")
-    
+    print(f"  有效数据比例阈值: {MIN_VALID_RATIO:.0%}")
+
     # ==================== 1. 加载CAMELSH数据读取器 ====================
     print(f"\n正在初始化CAMELSH数据读取器...")
     camelsh_reader = ImprovedCAMELSHReader(CAMELSH_DATA_PATH, download=False, use_batch=True)
-    
-    summary = camelsh_reader.get_data_summary()
-    print(f"数据概要:")
-    print(f"  总流域数量: {summary['total_basins']}")
-    
+
     camelsh = camelsh_reader.camelsh
     default_range = camelsh.default_t_range
     print(f"  默认时间范围: {default_range}")
-    
-    # ==================== 2. 读取候选流域列表 ====================
-    print(f"\n正在从文件读取候选流域列表...")
-    VALID_WATER_LEVEL_BASINS = load_waterlevel_basins_from_file("valid_waterlevel_basins.txt")
-    
-    # ==================== 3. 验证流域数据 ====================
-    # 与 multi_task_lstm.py 中完全相同的逻辑
-    max_candidates = min(len(VALID_WATER_LEVEL_BASINS), max(NUM_BASINS * 3, 200))
-    print(f"\n将检查前 {max_candidates} 个候选流域...")
-    
+
+    # ==================== 2. 获取全部候选流域（扫描 Hourly2 目录） ====================
+    # 以 Hourly2 目录中存在文件的流域为候选集（必须有水位文件），
+    # 径流是否有效由 filter 函数负责判断。
+    hourly2_dir = Path(CAMELSH_DATA_PATH) / "CAMELSH" / "Hourly2" / "Hourly2"
+    if not hourly2_dir.exists():
+        raise FileNotFoundError(f"Hourly2 目录不存在: {hourly2_dir}")
+
+    all_candidates = sorted(
+        f.stem.replace("_hourly", "")
+        for f in hourly2_dir.glob("*_hourly.nc")
+    )
+    print(f"\n从 Hourly2 目录扫描到 {len(all_candidates)} 个候选流域（全量，不限数目）")
+
+    # ==================== 3. 验证流域数据（全量，阈值 30%） ====================
     validated_basins = filter_basins_with_valid_data(
         camelsh_reader=camelsh_reader,
-        basin_list=VALID_WATER_LEVEL_BASINS,
+        basin_list=all_candidates,
         time_range=default_range,
-        max_basins_to_check=max_candidates,
-        min_valid_ratio=0.1
+        max_basins_to_check=None,   # 不限制，检查全部
+        min_valid_ratio=MIN_VALID_RATIO
     )
-    
+
     if len(validated_basins) == 0:
-        raise ValueError("未找到任何有效流域！")
-    
-    if len(validated_basins) < NUM_BASINS:
-        print(f"\n警告: 只找到了 {len(validated_basins)} 个有效流域，少于请求的 {NUM_BASINS} 个")
-        print(f"将使用所有找到的有效流域")
-    
-    # ==================== 4. 选择最终流域 ====================
-    chosen_basins = validated_basins[:NUM_BASINS]
-    
+        raise ValueError("未找到任何满足条件的流域！")
+
     print(f"\n{'='*80}")
-    print(f"最终选择的流域")
+    print(f"筛选结果")
     print(f"{'='*80}")
-    print(f"流域数量: {len(chosen_basins)}")
-    print(f"\n流域ID列表:")
-    print(chosen_basins)
-    
-    # ==================== 5. 保存结果 ====================
-    # 保存为TXT文件
-    output_txt = "actual_basin_ids.txt"
+    print(f"候选流域数: {len(all_candidates)}")
+    print(f"通过筛选数: {len(validated_basins)}")
+
+    # ==================== 4. 保存结果（使用新文件名，不覆盖原文件） ====================
+    # 输出到独立目录，不与代码混放
+    out_dir = Path(__file__).parent / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    output_txt    = out_dir / "all_basins_valid30pct.txt"
+    output_csv    = out_dir / "all_basins_valid30pct.csv"
+    output_report = out_dir / "all_basins_valid30pct_report.txt"
+
+    # TXT（Python 可直接 import 的格式）
     with open(output_txt, 'w', encoding='utf-8') as f:
-        f.write(f"# multi_task_lstm.py 实际使用的流域ID列表\n")
-        f.write(f"# 生成时间: {__import__('datetime').datetime.now()}\n")
-        f.write(f"# 流域数量: {len(chosen_basins)}\n")
-        f.write(f"# 配置: NUM_BASINS = {NUM_BASINS}\n")
-        f.write(f"\n")
-        f.write("ACTUAL_BASIN_IDS = [\n")
-        for i, basin_id in enumerate(chosen_basins):
-            if i < len(chosen_basins) - 1:
-                f.write(f"    '{basin_id}',\n")
-            else:
-                f.write(f"    '{basin_id}'\n")
+        f.write(f"# CAMELSH 全量筛选：Q 和 h 有效比例均 >= {MIN_VALID_RATIO:.0%}\n")
+        f.write(f"# 生成时间: {datetime.datetime.now()}\n")
+        f.write(f"# 候选流域数: {len(all_candidates)}\n")
+        f.write(f"# 通过筛选数: {len(validated_basins)}\n")
+        f.write(f"# 数据时间范围: {default_range}\n\n")
+        f.write("VALID_BASINS_30PCT = [\n")
+        for i, basin_id in enumerate(validated_basins):
+            comma = "," if i < len(validated_basins) - 1 else ""
+            f.write(f"    '{basin_id}'{comma}\n")
         f.write("]\n")
-    
-    print(f"\n已保存到文件: {output_txt}")
-    
-    # 保存为CSV文件
-    import pandas as pd
-    output_csv = "actual_basin_ids.csv"
+    print(f"\n已保存流域列表（TXT）: {output_txt}")
+
+    # CSV
     df = pd.DataFrame({
-        'basin_id': chosen_basins,
-        'index': range(1, len(chosen_basins) + 1)
+        'basin_id': validated_basins,
+        'rank':     range(1, len(validated_basins) + 1)
     })
     df.to_csv(output_csv, index=False)
-    print(f"已保存到文件: {output_csv}")
-    
-    # 打印前10个和后10个作为示例
-    print(f"\n前10个流域: {chosen_basins[:10]}")
-    print(f"后10个流域: {chosen_basins[-10:]}")
-    
-    # 创建简要报告
-    output_report = "actual_basin_ids_report.txt"
+    print(f"已保存流域列表（CSV）: {output_csv}")
+
+    # 文字报告
     with open(output_report, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
-        f.write("multi_task_lstm.py 实际使用的流域ID提取报告\n")
+        f.write("CAMELSH 全量流域筛选报告\n")
         f.write("=" * 80 + "\n\n")
-        f.write(f"生成时间: {__import__('datetime').datetime.now()}\n\n")
-        f.write(f"配置信息:\n")
-        f.write(f"  CAMELSH数据路径: {CAMELSH_DATA_PATH}\n")
-        f.write(f"  请求流域数量: {NUM_BASINS}\n")
-        f.write(f"  实际流域数量: {len(chosen_basins)}\n")
-        f.write(f"  数据时间范围: {default_range}\n\n")
-        f.write(f"流域列表:\n")
-        for i, basin_id in enumerate(chosen_basins, 1):
-            f.write(f"  {i:3d}. {basin_id}\n")
+        f.write(f"生成时间     : {datetime.datetime.now()}\n")
+        f.write(f"CAMELSH路径  : {CAMELSH_DATA_PATH}\n")
+        f.write(f"数据时间范围 : {default_range}\n")
+        f.write(f"有效比例阈值 : >= {MIN_VALID_RATIO:.0%}（Q 和 h 同时满足）\n\n")
+        f.write(f"候选流域数   : {len(all_candidates)}\n")
+        f.write(f"通过筛选数   : {len(validated_basins)}\n")
+        f.write(f"筛选通过率   : {len(validated_basins)/len(all_candidates)*100:.1f}%\n\n")
+        f.write("=" * 80 + "\n")
+        f.write("通过筛选的流域列表\n")
+        f.write("=" * 80 + "\n")
+        for i, basin_id in enumerate(validated_basins, 1):
+            f.write(f"  {i:4d}. {basin_id}\n")
         f.write("\n" + "=" * 80 + "\n")
-    
-    print(f"已保存报告: {output_report}")
-    
+    print(f"已保存筛选报告     : {output_report}")
+
+    print(f"\n前10个流域: {validated_basins[:10]}")
+    print(f"后10个流域: {validated_basins[-10:]}")
+
     print(f"\n{'='*80}")
-    print("提取完成!")
+    print("筛选完成!")
     print(f"{'='*80}")
-    print(f"生成的文件:")
-    print(f"  1. {output_txt} - Python格式的流域ID列表")
-    print(f"  2. {output_csv} - CSV格式的流域ID列表")
-    print(f"  3. {output_report} - 详细报告")
+    print(f"生成的文件（均不覆盖原有文件）:")
+    print(f"  1. {output_txt}    - Python 可导入的流域列表")
+    print(f"  2. {output_csv}    - CSV 格式流域列表")
+    print(f"  3. {output_report} - 详细筛选报告")
 
 
 if __name__ == "__main__":
