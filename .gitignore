@@ -31,3 +31,5 @@ config.py
 CLAUDE.md
 .claude/
 hydro-multitask-paper/
+src/training/improved_camelsh_reader.py
+src/training/mswep_loader.py
