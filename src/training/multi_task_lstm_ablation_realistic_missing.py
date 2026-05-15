@@ -1,15 +1,15 @@
 """
-多任务LSTM消融实验（HL2Q 水位→径流级联架构）：
+多任务LSTM消融实验（WL2D 水位→径流级联架构）：
 基于真实故障统计的"段状"人工标签缺失（不是 MCAR 逐点随机）。
 
-与 multi_task_lstm_ablation_hl2q_repeat.py 的区别：
+与 multi_task_lstm_ablation_wl2d_repeat.py 的区别：
 1. create_missing_mask 改为段状注入：
    - 段长从真实故障段长度的全局 ECDF（经验分布）中 bootstrap 采样；
    - 段起点在原本"有效"的时间位置里均匀随机挑选；
    - 总注入量仍由 extra_ratio（= 新挖掉点数 / 原有效点数）精确控制，
      等价于 MCAR 的 missing_ratio 口径。
 2. 径流与水位各自使用自己的 ECDF（来自 fault_recovery_Q.csv / fault_recovery_H.csv）。
-3. 测试集时段依然使用原始完整数据（与 hl2q_repeat 一致，评估指标不受污染）。
+3. 测试集时段依然使用原始完整数据（与 wl2d_repeat 一致，评估指标不受污染）。
 4. 档位、重复次数、指标聚合、绘图等其他逻辑完全保持与 MCAR 版一致，结果可直接对照。
 """
 import os
@@ -642,7 +642,7 @@ class MultiTaskDatasetWithMissingLabels(Dataset):
 
 class MultiTaskLSTM(nn.Module):
     """
-    水位→径流级联多任务 LSTM 网络（HL2Q）—— 消融实验版
+    水位→径流级联多任务 LSTM 网络（WL2D）—— 消融实验版
 
     Stage-1: 共享 LSTM + 水位预测头
     Stage-2: 径流预测头（接收共享隐层 + 水位预测经投影后的特征）
@@ -654,7 +654,7 @@ class MultiTaskLSTM(nn.Module):
         hidden_size: int,
         dropout_rate: float = 0.0,
         task_weights: dict = None,
-        hl_proj_size: int = 16,
+        wl_proj_size: int = 16,
         stop_gradient: bool = False,
     ):
         super(MultiTaskLSTM, self).__init__()
@@ -672,11 +672,11 @@ class MultiTaskLSTM(nn.Module):
 
         self.fc_waterlevel = nn.Linear(hidden_size, 1)
 
-        self.hl_proj = nn.Sequential(
-            nn.Linear(1, hl_proj_size),
+        self.wl_proj = nn.Sequential(
+            nn.Linear(1, wl_proj_size),
             nn.ReLU(),
         )
-        self.fc_flow = nn.Linear(hidden_size + hl_proj_size, 1)
+        self.fc_flow = nn.Linear(hidden_size + wl_proj_size, 1)
 
         self.task_weights = task_weights if task_weights is not None else {'flow': 1.0, 'waterlevel': 1.0}
 
@@ -686,9 +686,9 @@ class MultiTaskLSTM(nn.Module):
 
         pred_waterlevel = self.fc_waterlevel(hidden)
 
-        hl_input = pred_waterlevel.detach() if self.stop_gradient else pred_waterlevel
-        hl_feat = self.hl_proj(hl_input)
-        flow_input = torch.cat([hidden, hl_feat], dim=-1)
+        wl_input = pred_waterlevel.detach() if self.stop_gradient else pred_waterlevel
+        wl_feat = self.wl_proj(wl_input)
+        flow_input = torch.cat([hidden, wl_feat], dim=-1)
         pred_flow = self.fc_flow(flow_input)
 
         return pred_flow, pred_waterlevel
@@ -1045,13 +1045,13 @@ def run_ablation_experiment(flow_missing_ratio, waterlevel_missing_ratio,
     test_loader = DataLoader(ds_test, batch_size=1000, shuffle=False)
 
     # 创建模型
-    print("\n创建模型（HL2Q）...")
+    print("\n创建模型（WL2D）...")
     model = MultiTaskLSTM(
         input_size=kwargs['input_size'],
         hidden_size=kwargs['hidden_size'],
         dropout_rate=kwargs['dropout_rate'],
         task_weights=kwargs['task_weights'],
-        hl_proj_size=kwargs.get('hl_proj_size', 16),
+        wl_proj_size=kwargs.get('wl_proj_size', 16),
         stop_gradient=kwargs.get('stop_gradient', False),
     ).to(DEVICE)
 
@@ -1219,7 +1219,7 @@ if __name__ == "__main__":
         FORCING_VARIABLES, ATTRIBUTE_VARIABLES,
     )
 
-    # 独立输出目录：避免与 MCAR 版（hl2q_repeat）结果相互覆盖
+    # 独立输出目录：避免与 MCAR 版（wl2d_repeat）结果相互覆盖
     OUTPUT_ROOT = Path("results") / "ablation_realistic_missing"
     MODEL_SAVE_PATH = str(OUTPUT_ROOT / "models")
     IMAGES_SAVE_PATH = str(OUTPUT_ROOT / "images")
@@ -1349,7 +1349,7 @@ if __name__ == "__main__":
         'learning_rate': 1e-3,
         'task_weights': {'flow': 1.0, 'waterlevel': 1.0},
         'n_epochs': EPOCHS,
-        'hl_proj_size': 16,
+        'wl_proj_size': 16,
         'stop_gradient': False,
         # 段状注入用的 ECDF 样本
         'flow_fault_lengths': flow_fault_lengths,
@@ -1403,7 +1403,7 @@ if __name__ == "__main__":
             all_raw_results.append(results)
 
             # 保存单次模型
-            model_path = os.path.join(MODEL_SAVE_PATH, f'hl2q_realistic_{run_name}.pth')
+            model_path = os.path.join(MODEL_SAVE_PATH, f'wl2d_realistic_{run_name}.pth')
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'means': means,
@@ -1450,7 +1450,7 @@ if __name__ == "__main__":
         '流域数_水位': r['n_basins_waterlevel'],
     } for r in all_raw_results])
 
-    raw_csv = os.path.join(REPORTS_SAVE_PATH, "hl2q_realistic_raw_results.csv")
+    raw_csv = os.path.join(REPORTS_SAVE_PATH, "wl2d_realistic_raw_results.csv")
     raw_df.to_csv(raw_csv, index=False, encoding='utf-8-sig')
     print(f"\n已保存原始结果CSV: {raw_csv}")
 
@@ -1473,7 +1473,7 @@ if __name__ == "__main__":
         '流域数_水位': a['n_basins_waterlevel'],
     } for a in all_aggregated_results])
 
-    agg_csv = os.path.join(REPORTS_SAVE_PATH, "hl2q_realistic_aggregated_results.csv")
+    agg_csv = os.path.join(REPORTS_SAVE_PATH, "wl2d_realistic_aggregated_results.csv")
     agg_df.to_csv(agg_csv, index=False, encoding='utf-8-sig')
     print(f"已保存聚合结果CSV: {agg_csv}")
 
@@ -1583,7 +1583,7 @@ if __name__ == "__main__":
 
     plt.tight_layout()
     comparison_file = os.path.join(
-        IMAGES_SAVE_PATH, "hl2q_realistic_comparison.png"
+        IMAGES_SAVE_PATH, "wl2d_realistic_comparison.png"
     )
     plt.savefig(comparison_file, dpi=300, bbox_inches='tight')
     print(f"已保存对比图: {comparison_file}")

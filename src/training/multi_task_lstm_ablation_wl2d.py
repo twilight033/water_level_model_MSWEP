@@ -1,8 +1,8 @@
 """
-多任务LSTM消融实验（HL2Q 水位→径流级联架构）：标签缺失情况下的模型性能
+多任务LSTM消融实验（WL2D 水位→径流级联架构）：标签缺失情况下的模型性能
 测试场景：径流/水位数据在10%/30%/50%随机缺失情况下的模型表现
 
-模型改动：在原消融实验的基础上，将独立双头结构改为 HL2Q 级联结构，
+模型改动：在原消融实验的基础上，将独立双头结构改为 WL2D 级联结构，
 即水位预测值经投影后拼接到径流预测头，形成 水位 → 径流 的显式信息通路。
 """
 import os
@@ -540,12 +540,12 @@ class MultiTaskDatasetWithMissingLabels(Dataset):
 
 class MultiTaskLSTM(nn.Module):
     """
-    水位→径流级联多任务 LSTM 网络（HL2Q）—— 消融实验版
+    水位→径流级联多任务 LSTM 网络（WL2D）—— 消融实验版
 
     结构说明
     --------
     Stage-1: 共享 LSTM + 水位预测头
-        输入：气象强迫 + 流域属性  →  输出：水位预测 pred_h [batch, 1]
+        输入：气象强迫 + 流域属性  →  输出：水位预测 pred_wl [batch, 1]
     Stage-2: 径流预测头
         输入：共享隐层表示  +  Stage-1 水位预测（经投影）
         → 形成 水位 → 径流 的显式信息通路
@@ -557,7 +557,7 @@ class MultiTaskLSTM(nn.Module):
         hidden_size: int,
         dropout_rate: float = 0.0,
         task_weights: dict = None,
-        hl_proj_size: int = 16,
+        wl_proj_size: int = 16,
         stop_gradient: bool = False,
     ):
         """
@@ -571,7 +571,7 @@ class MultiTaskLSTM(nn.Module):
             Dropout 比率
         task_weights : dict
             任务权重 {'flow': w1, 'waterlevel': w2}
-        hl_proj_size : int
+        wl_proj_size : int
             水位预测值投影到径流头前的中间维度，默认 16
         stop_gradient : bool
             True  → 水位预测值以 detach() 传入径流头（梯度隔离）
@@ -595,11 +595,11 @@ class MultiTaskLSTM(nn.Module):
         self.fc_waterlevel = nn.Linear(hidden_size, 1)
 
         # ── Stage-2：水位→径流 信息通路 ───────────────────────────────────────
-        self.hl_proj = nn.Sequential(
-            nn.Linear(1, hl_proj_size),
+        self.wl_proj = nn.Sequential(
+            nn.Linear(1, wl_proj_size),
             nn.ReLU(),
         )
-        self.fc_flow = nn.Linear(hidden_size + hl_proj_size, 1)
+        self.fc_flow = nn.Linear(hidden_size + wl_proj_size, 1)
 
         self.task_weights = task_weights if task_weights is not None else {'flow': 1.0, 'waterlevel': 1.0}
 
@@ -622,9 +622,9 @@ class MultiTaskLSTM(nn.Module):
         pred_waterlevel = self.fc_waterlevel(hidden)   # [batch, 1]
 
         # Stage-2：水位 → 径流 通路
-        hl_input = pred_waterlevel.detach() if self.stop_gradient else pred_waterlevel
-        hl_feat = self.hl_proj(hl_input)              # [batch, hl_proj_size]
-        flow_input = torch.cat([hidden, hl_feat], dim=-1)
+        wl_input = pred_waterlevel.detach() if self.stop_gradient else pred_waterlevel
+        wl_feat = self.wl_proj(wl_input)              # [batch, wl_proj_size]
+        flow_input = torch.cat([hidden, wl_feat], dim=-1)
         pred_flow = self.fc_flow(flow_input)           # [batch, 1]
 
         return pred_flow, pred_waterlevel
@@ -999,14 +999,14 @@ def run_ablation_experiment(flow_missing_ratio, waterlevel_missing_ratio,
     )
     test_loader = DataLoader(ds_test, batch_size=1000, shuffle=False)
     
-    # 创建模型（HL2Q 水位→径流级联架构）
-    print("\n创建模型（HL2Q）...")
+    # 创建模型（WL2D 水位→径流级联架构）
+    print("\n创建模型（WL2D）...")
     model = MultiTaskLSTM(
         input_size=kwargs['input_size'],
         hidden_size=kwargs['hidden_size'],
         dropout_rate=kwargs['dropout_rate'],
         task_weights=kwargs['task_weights'],
-        hl_proj_size=kwargs.get('hl_proj_size', 16),
+        wl_proj_size=kwargs.get('wl_proj_size', 16),
         stop_gradient=kwargs.get('stop_gradient', False),
     ).to(DEVICE)
     
@@ -1260,8 +1260,8 @@ if __name__ == "__main__":
         'learning_rate': 1e-3,
         'task_weights': {'flow': 1.0, 'waterlevel': 1.0},
         'n_epochs': EPOCHS,
-        # HL2Q 专属参数
-        'hl_proj_size': 16,    # 水位投影维度
+        # WL2D 专属参数
+        'wl_proj_size': 16,    # 水位投影维度
         'stop_gradient': False, # 是否隔离水位梯度
     }
     
@@ -1310,7 +1310,7 @@ if __name__ == "__main__":
         all_results.append(results)
         
         # 保存模型
-        model_path = os.path.join(MODEL_SAVE_PATH, f'hl2q_ablation_{exp_name}.pth')
+        model_path = os.path.join(MODEL_SAVE_PATH, f'wl2d_ablation_{exp_name}.pth')
         torch.save({
             'model_state_dict': model.state_dict(),
             'means': means,
@@ -1409,7 +1409,7 @@ if __name__ == "__main__":
         ax4.axhline(y=0, color='k', linestyle='-', linewidth=0.8)
     
     plt.tight_layout()
-    comparison_file = os.path.join(IMAGES_SAVE_PATH, "hl2q_ablation_asymmetric_missing_comparison.png")
+    comparison_file = os.path.join(IMAGES_SAVE_PATH, "wl2d_ablation_asymmetric_missing_comparison.png")
     plt.savefig(comparison_file, dpi=300, bbox_inches='tight')
     print(f"已保存对比图: {comparison_file}")
     
@@ -1425,7 +1425,7 @@ if __name__ == "__main__":
         '流域数_水位': [r['n_basins_waterlevel'] for r in all_results],
     })
     
-    csv_file = os.path.join(REPORTS_SAVE_PATH, "hl2q_ablation_asymmetric_missing_results.csv")
+    csv_file = os.path.join(REPORTS_SAVE_PATH, "wl2d_ablation_asymmetric_missing_results.csv")
     results_df.to_csv(csv_file, index=False, encoding='utf-8-sig')
     print(f"已保存结果CSV: {csv_file}")
     

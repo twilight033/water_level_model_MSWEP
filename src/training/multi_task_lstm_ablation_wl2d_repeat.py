@@ -1,8 +1,8 @@
 """
-多任务LSTM消融实验（HL2Q 水位→径流级联架构）：标签缺失情况下的模型性能
+多任务LSTM消融实验（WL2D 水位→径流级联架构）：标签缺失情况下的模型性能
 测试场景：径流/水位数据在10%/30%/50%随机缺失情况下的模型表现
 
-与 multi_task_lstm_ablation_hl2q.py 的区别：
+与 multi_task_lstm_ablation_wl2d.py 的区别：
 1. create_missing_mask 使用局部随机生成器（np.random.default_rng），不污染全局状态
 2. 每个缺失场景用多个不同的随机种子重复实验，结果以均值 ± 标准差表示
 3. 图表加入误差棒；CSV 同时保存每次原始结果和聚合结果
@@ -513,7 +513,7 @@ class MultiTaskDatasetWithMissingLabels(Dataset):
 
 class MultiTaskLSTM(nn.Module):
     """
-    水位→径流级联多任务 LSTM 网络（HL2Q）—— 消融实验版
+    水位→径流级联多任务 LSTM 网络（WL2D）—— 消融实验版
 
     Stage-1: 共享 LSTM + 水位预测头
     Stage-2: 径流预测头（接收共享隐层 + 水位预测经投影后的特征）
@@ -525,7 +525,7 @@ class MultiTaskLSTM(nn.Module):
         hidden_size: int,
         dropout_rate: float = 0.0,
         task_weights: dict = None,
-        hl_proj_size: int = 16,
+        wl_proj_size: int = 16,
         stop_gradient: bool = False,
     ):
         super(MultiTaskLSTM, self).__init__()
@@ -543,11 +543,11 @@ class MultiTaskLSTM(nn.Module):
 
         self.fc_waterlevel = nn.Linear(hidden_size, 1)
 
-        self.hl_proj = nn.Sequential(
-            nn.Linear(1, hl_proj_size),
+        self.wl_proj = nn.Sequential(
+            nn.Linear(1, wl_proj_size),
             nn.ReLU(),
         )
-        self.fc_flow = nn.Linear(hidden_size + hl_proj_size, 1)
+        self.fc_flow = nn.Linear(hidden_size + wl_proj_size, 1)
 
         self.task_weights = task_weights if task_weights is not None else {'flow': 1.0, 'waterlevel': 1.0}
 
@@ -557,9 +557,9 @@ class MultiTaskLSTM(nn.Module):
 
         pred_waterlevel = self.fc_waterlevel(hidden)
 
-        hl_input = pred_waterlevel.detach() if self.stop_gradient else pred_waterlevel
-        hl_feat = self.hl_proj(hl_input)
-        flow_input = torch.cat([hidden, hl_feat], dim=-1)
+        wl_input = pred_waterlevel.detach() if self.stop_gradient else pred_waterlevel
+        wl_feat = self.wl_proj(wl_input)
+        flow_input = torch.cat([hidden, wl_feat], dim=-1)
         pred_flow = self.fc_flow(flow_input)
 
         return pred_flow, pred_waterlevel
@@ -914,13 +914,13 @@ def run_ablation_experiment(flow_missing_ratio, waterlevel_missing_ratio,
     test_loader = DataLoader(ds_test, batch_size=1000, shuffle=False)
 
     # 创建模型
-    print("\n创建模型（HL2Q）...")
+    print("\n创建模型（WL2D）...")
     model = MultiTaskLSTM(
         input_size=kwargs['input_size'],
         hidden_size=kwargs['hidden_size'],
         dropout_rate=kwargs['dropout_rate'],
         task_weights=kwargs['task_weights'],
-        hl_proj_size=kwargs.get('hl_proj_size', 16),
+        wl_proj_size=kwargs.get('wl_proj_size', 16),
         stop_gradient=kwargs.get('stop_gradient', False),
     ).to(DEVICE)
 
@@ -1208,7 +1208,7 @@ if __name__ == "__main__":
         'learning_rate': 1e-3,
         'task_weights': {'flow': 1.0, 'waterlevel': 1.0},
         'n_epochs': EPOCHS,
-        'hl_proj_size': 16,
+        'wl_proj_size': 16,
         'stop_gradient': False,
     }
 
@@ -1259,7 +1259,7 @@ if __name__ == "__main__":
             all_raw_results.append(results)
 
             # 保存单次模型
-            model_path = os.path.join(MODEL_SAVE_PATH, f'hl2q_ablation_{run_name}.pth')
+            model_path = os.path.join(MODEL_SAVE_PATH, f'wl2d_ablation_{run_name}.pth')
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'means': means,
@@ -1306,7 +1306,7 @@ if __name__ == "__main__":
         '流域数_水位': r['n_basins_waterlevel'],
     } for r in all_raw_results])
 
-    raw_csv = os.path.join(REPORTS_SAVE_PATH, "hl2q_ablation_repeat_raw_results.csv")
+    raw_csv = os.path.join(REPORTS_SAVE_PATH, "wl2d_ablation_repeat_raw_results.csv")
     raw_df.to_csv(raw_csv, index=False, encoding='utf-8-sig')
     print(f"\n已保存原始结果CSV: {raw_csv}")
 
@@ -1329,7 +1329,7 @@ if __name__ == "__main__":
         '流域数_水位': a['n_basins_waterlevel'],
     } for a in all_aggregated_results])
 
-    agg_csv = os.path.join(REPORTS_SAVE_PATH, "hl2q_ablation_repeat_aggregated_results.csv")
+    agg_csv = os.path.join(REPORTS_SAVE_PATH, "wl2d_ablation_repeat_aggregated_results.csv")
     agg_df.to_csv(agg_csv, index=False, encoding='utf-8-sig')
     print(f"已保存聚合结果CSV: {agg_csv}")
 
@@ -1439,7 +1439,7 @@ if __name__ == "__main__":
 
     plt.tight_layout()
     comparison_file = os.path.join(
-        IMAGES_SAVE_PATH, "hl2q_ablation_repeat_comparison.png"
+        IMAGES_SAVE_PATH, "wl2d_ablation_repeat_comparison.png"
     )
     plt.savefig(comparison_file, dpi=300, bbox_inches='tight')
     print(f"已保存对比图: {comparison_file}")

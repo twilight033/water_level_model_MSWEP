@@ -686,13 +686,13 @@ class MultiTaskDataset(Dataset):
 
 class MultiTaskLSTM(nn.Module):
     """
-    水位→径流级联多任务 LSTM 网络（HL2Q）
+    水位→径流级联多任务 LSTM 网络（WL2D）
 
     结构说明
     --------
     Stage-1: 共享 LSTM + 水位预测头
         - 输入：气象强迫 + 流域属性
-        - 输出：水位预测值 pred_h  [batch, 1]
+        - 输出：水位预测值 pred_wl  [batch, 1]
     Stage-2: 径流预测头
         - 输入：共享 LSTM 的隐层表示  +  Stage-1 水位预测（stop-gradient 可选）
         - 让水位信息直接参与径流预测
@@ -707,7 +707,7 @@ class MultiTaskLSTM(nn.Module):
         hidden_size: int,
         dropout_rate: float = 0.0,
         task_weights: dict = None,
-        hl_proj_size: int = 16,
+        wl_proj_size: int = 16,
         stop_gradient: bool = False,
     ):
         """
@@ -721,7 +721,7 @@ class MultiTaskLSTM(nn.Module):
             Dropout 比率
         task_weights : dict
             任务权重 {'flow': w1, 'waterlevel': w2}
-        hl_proj_size : int
+        wl_proj_size : int
             水位预测值投影到径流头前的中间维度，默认 16
         stop_gradient : bool
             True  → 水位预测值以 detach() 传入径流头（避免水位梯度污染径流）
@@ -745,13 +745,13 @@ class MultiTaskLSTM(nn.Module):
         self.fc_waterlevel = nn.Linear(hidden_size, 1)
 
         # ── Stage-2：水位→径流 信息通路 ───────────────────────────────────────
-        # 把水位预测值（1 维）先投影到 hl_proj_size 维，再与隐层表示拼接
-        self.hl_proj = nn.Sequential(
-            nn.Linear(1, hl_proj_size),
+        # 把水位预测值（1 维）先投影到 wl_proj_size 维，再与隐层表示拼接
+        self.wl_proj = nn.Sequential(
+            nn.Linear(1, wl_proj_size),
             nn.ReLU(),
         )
-        # 径流预测头：接收 hidden_size + hl_proj_size 维特征
-        self.fc_flow = nn.Linear(hidden_size + hl_proj_size, 1)
+        # 径流预测头：接收 hidden_size + wl_proj_size 维特征
+        self.fc_flow = nn.Linear(hidden_size + wl_proj_size, 1)
 
         # 任务权重
         self.task_weights = task_weights if task_weights is not None else {'flow': 1.0, 'waterlevel': 1.0}
@@ -777,11 +777,11 @@ class MultiTaskLSTM(nn.Module):
         pred_waterlevel = self.fc_waterlevel(hidden)   # [batch, 1]
 
         # ── Stage-2：水位 → 径流 通路 ─────────────────────────────────────────
-        hl_input = pred_waterlevel.detach() if self.stop_gradient else pred_waterlevel
-        hl_feat = self.hl_proj(hl_input)              # [batch, hl_proj_size]
+        wl_input = pred_waterlevel.detach() if self.stop_gradient else pred_waterlevel
+        wl_feat = self.wl_proj(wl_input)              # [batch, wl_proj_size]
 
         # 拼接隐层表示与水位特征
-        flow_input = torch.cat([hidden, hl_feat], dim=-1)   # [batch, hidden_size + hl_proj_size]
+        flow_input = torch.cat([hidden, wl_feat], dim=-1)   # [batch, hidden_size + wl_proj_size]
         pred_flow = self.fc_flow(flow_input)                 # [batch, 1]
 
         return pred_flow, pred_waterlevel
@@ -1456,13 +1456,13 @@ if __name__ == "__main__":
     test_batch_size = 1000
     test_loader = DataLoader(ds_test, batch_size=test_batch_size, shuffle=False)
     
-    # ==================== 6. 创建模型（HL2Q 水位→径流级联架构）====================
-    print("\n正在创建多任务LSTM模型（HL2Q 水位→径流级联架构）...")
+    # ==================== 6. 创建模型（WL2D 水位→径流级联架构）====================
+    print("\n正在创建多任务LSTM模型（WL2D 水位→径流级联架构）...")
     input_size = len(chosen_attrs_vars) + len(chosen_forcing_vars)
     hidden_size = 64   # LSTM 隐藏层大小
     dropout_rate = 0.2 # Dropout 率
     learning_rate = 1e-3
-    hl_proj_size = 16  # 水位投影到径流头的中间维度
+    wl_proj_size = 16  # 水位投影到径流头的中间维度
     stop_gradient = False  # True=水位梯度不反传到径流; False=端到端联合训练
 
     # 设置任务权重（可以根据需要调整）
@@ -1473,7 +1473,7 @@ if __name__ == "__main__":
         hidden_size=hidden_size,
         dropout_rate=dropout_rate,
         task_weights=task_weights,
-        hl_proj_size=hl_proj_size,
+        wl_proj_size=wl_proj_size,
         stop_gradient=stop_gradient,
     ).to(DEVICE)
 
@@ -1482,7 +1482,7 @@ if __name__ == "__main__":
 
     print(f"模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     print(f"设备: {DEVICE}")
-    print(f"水位→径流投影维度: {hl_proj_size}")
+    print(f"水位→径流投影维度: {wl_proj_size}")
     print(f"stop_gradient: {stop_gradient}")
     
     # ==================== 7. 训练模型（带早停机制）====================
@@ -1681,7 +1681,7 @@ if __name__ == "__main__":
         plt.tight_layout()
         
         # 保存图片
-        output_file = os.path.join(IMAGES_SAVE_PATH, f"hl2q_results_basin_{basin}.png")
+        output_file = os.path.join(IMAGES_SAVE_PATH, f"wl2d_results_basin_{basin}.png")
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         print(f"已保存图片: {output_file}")
 
@@ -1704,13 +1704,13 @@ if __name__ == "__main__":
     axes[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    training_curve_file = os.path.join(IMAGES_SAVE_PATH, "hl2q_training_curves.png")
+    training_curve_file = os.path.join(IMAGES_SAVE_PATH, "wl2d_training_curves.png")
     plt.savefig(training_curve_file, dpi=300, bbox_inches='tight')
     print(f"已保存训练曲线: {training_curve_file}")
     
     # ==================== 10. 保存模型 ====================
     print("\n正在保存模型...")
-    model_path = os.path.join(MODEL_SAVE_PATH, 'hl2q_lstm_model.pth')
+    model_path = os.path.join(MODEL_SAVE_PATH, 'wl2d_lstm_model.pth')
     torch.save({
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
