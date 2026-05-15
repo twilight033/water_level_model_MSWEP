@@ -3,7 +3,7 @@ data/
 qualifiers_cache/
 qualifiers_cache_per_basin_train/
 qualifiers_cache_full/
-results/reports/
+results/
 camelsh_data/
 MSWEP/
 qualifiers_output/
@@ -30,3 +30,4 @@ config.py
 86basin_ids.txt
 CLAUDE.md
 .claude/
+hydro-multitask-paper/
