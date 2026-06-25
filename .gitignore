@@ -33,3 +33,5 @@ CLAUDE.md
 hydro-multitask-paper/
 src/training/improved_camelsh_reader.py
 src/training/mswep_loader.py
+.codegraph/
+outputs/

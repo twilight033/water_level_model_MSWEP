@@ -192,13 +192,13 @@ class MultiTaskDataset(Dataset):
         c = np.tile(c, (seq_length, 1))
         xc = np.concatenate((x, c), axis=1)
         
-        # 获取两个目标输出（序列最后一天的值）
+        # 获取两个目标输出（目标时刻后移一步：t₀ + L*3h，消除数据泄露）
         # 注意：目标数据使用原始时间索引，需要从lookup_table中获取的time_idx开始计算
         target_time_idx = time_idx
         if target_time_idx in self.data_flow.index:
-            # 目标值对应的是序列结束时刻
+            # 目标时刻后移一步至 t₀+L*3h，消除 MSWEP 向前累计约定的数据泄露
             # 由于强迫数据是3小时分辨率，需要找到对应的目标数据位置
-            end_time = target_time_idx + pd.Timedelta(hours=(seq_length - 1) * 3)
+            end_time = target_time_idx + pd.Timedelta(hours=seq_length * 3)
             if end_time in self.data_flow.index:
                 target_end_pos = self.data_flow.index.get_loc(end_time)
                 y_flow = self.y_flow[basin][target_end_pos]
@@ -211,7 +211,7 @@ class MultiTaskDataset(Dataset):
         else:
             # 如果时间索引不存在，找最近的
             nearest_idx = self.data_flow.index.get_indexer([target_time_idx], method='nearest')[0]
-            end_time = target_time_idx + pd.Timedelta(hours=(seq_length - 1) * 3)
+            end_time = target_time_idx + pd.Timedelta(hours=seq_length * 3)
             nearest_end_idx = self.data_flow.index.get_indexer([end_time], method='nearest')[0]
             y_flow = self.y_flow[basin][nearest_end_idx]
             y_waterlevel = self.y_waterlevel[basin][nearest_end_idx]
@@ -568,8 +568,8 @@ class MultiTaskDataset(Dataset):
             # 找出强迫数据时间点中，对应的目标数据也有效的时间点
             valid_forcing_times = []
             for ft in forcing_times:
-                # 计算序列结束时刻
-                end_time = ft + pd.Timedelta(hours=(seq_length - 1) * 3)
+                # 计算目标时刻（后移一步：t₀ + L*3h，消除数据泄露）
+                end_time = ft + pd.Timedelta(hours=seq_length * 3)
                 # 检查结束时刻的目标数据是否有效
                 if end_time in valid_target_times:
                     valid_forcing_times.append(ft)
@@ -613,8 +613,8 @@ class MultiTaskDataset(Dataset):
             for idx in range(range_start_idx, range_end_idx - seq_length + 1, WINDOW_STEP):
                 # 获取这个窗口的起始时间
                 window_start_time = forcing_times[idx]
-                # 计算结束时间
-                window_end_time = window_start_time + pd.Timedelta(hours=(seq_length - 1) * 3)
+                # 计算目标时刻（后移一步：t₀ + L*3h）
+                window_end_time = window_start_time + pd.Timedelta(hours=seq_length * 3)
                 
                 # 检查结束时间的目标数据是否有效
                 if window_end_time in valid_target_times:
@@ -1010,7 +1010,7 @@ def set_random_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-def load_waterlevel_basins_from_file(file_path="valid_waterlevel_basins.txt"):
+def load_waterlevel_basins_from_file(file_path="86basin_ids.txt"):
     """
     从文件中读取有水位数据的流域列表
     
@@ -1337,7 +1337,7 @@ if __name__ == "__main__":
     # 从MSWEP加载降雨数据
     print("\n从MSWEP加载降雨数据...")
     mswep_precip_df = load_mswep_data(
-        file_path="MSWEP/mswep_220basins_mean_3hourly_1980_2024.csv",
+        file_path="MSWEP/mswep_1000basins_mean_3hourly_1980_2024.csv",
         basin_ids=chosen_basins,
         time_range=default_range
     )
@@ -1641,9 +1641,9 @@ if __name__ == "__main__":
     print("\n正在生成可视化图表...")
     
     # 日期范围：按测试集时间 + 序列长度来推一推
-    # 注意：使用3小时分辨率（freq='3H'）
+    # 注意：使用3小时分辨率（freq='3H'）；目标后移一步，start_date 相应后移至 t₀+L*3h
     start_date = pd.to_datetime(ds_test.dates[0], format="%Y-%m-%d") + pd.Timedelta(
-        hours=(sequence_length - 1) * 3  # 3小时分辨率
+        hours=sequence_length * 3  # 3小时分辨率，目标后移一步
     )
     
     for b in evaluated_basins:
