@@ -105,6 +105,13 @@ def build_matrix(scale: str = "full") -> list:
         for seed in miss_model_seeds:
             add("4F_threshold", arch, "complete", seed, strict_basins=True)
 
+    # 4-G 任务权重敏感性。默认 1:1 会让共享编码器被更易学的水位任务拽偏，
+    # 不排除这一项就无法把"多任务无收益"与"任务权重没调"区分开。
+    # w_h = 1.0 的情形已由 4-A 的 dual_head 覆盖，此处只跑更小的权重。
+    for w_h in (0.1, 0.25, 0.5):
+        for seed in miss_model_seeds:
+            add("4G_taskweight", "dual_head", "complete", seed, waterlevel_weight=w_h)
+
     return entries
 
 
@@ -119,6 +126,8 @@ def run_key(entry: dict) -> str:
         parts.append(entry["loss_norm"])
     if entry.get("strict_basins"):
         parts.append("strict")
+    if entry.get("waterlevel_weight") is not None:
+        parts.append(f"wh{entry['waterlevel_weight']:g}")
     return "_".join(parts)
 
 
@@ -153,6 +162,9 @@ def run_one(prepared, entry: dict, force: bool = False, verbose: bool = False) -
         cfg_kwargs["seq_length"] = entry["seq_length"]
     if entry.get("loss_norm"):
         cfg_kwargs["loss_norm"] = entry["loss_norm"]
+    if entry.get("waterlevel_weight") is not None:
+        cfg_kwargs["task_weights"] = {"flow": 1.0,
+                                      "waterlevel": entry["waterlevel_weight"]}
     cfg = TrainConfig(**cfg_kwargs)
 
     t0 = time.time()
