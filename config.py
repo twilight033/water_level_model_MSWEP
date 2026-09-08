@@ -1,25 +1,35 @@
 """
-CAMELSH数据集配置文件
+数据路径与实验配置
 
-在这里修改您的CAMELSH数据路径和其他配置
+原始数据路径因机器而异，但本文件同时含有必须跨机器一致的定义
+（ATTRIBUTE_VARIABLES、SEQUENCE_LENGTH 等），所以文件本身纳入版本管理，
+而机器相关的路径改为**优先读环境变量**：换机器时设置环境变量即可，
+不必修改被 git 跟踪的文件，也就不会每次 pull 都冲突。
+
+    $env:CAMELSH_DATA_PATH = "E:/data"
+    $env:MSWEP_CSV_PATH    = "E:/data/mswep_1000basins_mean_3hourly_1980_2024.csv"
+
+注意：这些路径只在**重建缓存**时用到。缓存
+（data/camelsh_exported/*.parquet）建好之后，训练与评估不再读取原始数据。
 """
 
-# ==================== CAMELSH数据路径配置 ====================
-# 修改为您的实际CAMELSH数据路径
-# 支持相对路径和绝对路径
-CAMELSH_DATA_PATH = "F:/data"
-CAMELSUS_DATA_PATH = "D:/data/camels_us"
-# 注意：确保路径下有CAMELSH目录，包含以下结构：
-# F:/data/CAMELSH/
-# ├── attributes/
-# ├── timeseries/
-# ├── shapefiles/
-# └── 其他相关文件
+import os
 
-# 示例路径（取消注释并修改为您的路径）:
-# CAMELSH_DATA_PATH = "D:/data/camelsh"
-# CAMELSH_DATA_PATH = "/home/user/data/camelsh"
-# CAMELSH_DATA_PATH = "../camelsh_dataset"
+# ==================== CAMELSH数据路径配置 ====================
+# 指向包含 CAMELSH/ 的父目录；其下需有
+#   CAMELSH/timeseries/Data/CAMELSH/timeseries/
+#   CAMELSH/Hourly2/Hourly2/
+#   CAMELSH/attributes/
+# 启动前会由 pipeline.paths.verify_camelsh_path 校验，缺目录立即报错
+CAMELSH_DATA_PATH = os.environ.get("CAMELSH_DATA_PATH", "F:/data")
+CAMELSUS_DATA_PATH = os.environ.get("CAMELSUS_DATA_PATH", "D:/data/camels_us")
+
+# ==================== MSWEP 降水 CSV 路径 ====================
+# 3 小时分辨率的 1000 流域降水表。可写绝对路径，也可写相对于项目根目录的
+# 相对路径；由 pipeline.paths.resolve_mswep_csv 解析并校验存在性。
+MSWEP_CSV_PATH = os.environ.get(
+    "MSWEP_CSV_PATH", "data/MSWEP/mswep_1000basins_mean_3hourly_1980_2024.csv"
+)
 
 # ==================== 模型训练配置 ====================
 # 流域数量（用于测试）

@@ -17,9 +17,12 @@ for _p in (str(_ROOT / "src"), str(_ROOT), str(_ROOT / "src" / "others")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from pipeline.paths import EXPORT_DIR, load_basin_ids, verify_camelsh_path  # noqa: E402
+from pipeline.paths import (  # noqa: E402
+    EXPORT_DIR, load_basin_ids, resolve_mswep_csv, verify_camelsh_path,
+)
 
-MSWEP_CSV = _ROOT / "data" / "MSWEP" / "mswep_1000basins_mean_3hourly_1980_2024.csv"
+# MSWEP CSV 的位置来自 config.MSWEP_CSV_PATH（可由同名环境变量覆盖），
+# 不在此硬编码；只有重建缓存时才需要它
 MSWEP_CACHE = EXPORT_DIR / "mswep_precip_3h_86.parquet"
 
 # 从 CAMELSH 读取并重采样到 3 小时的变量（降水不在此列，来自 MSWEP）
@@ -37,9 +40,11 @@ def export_mswep_precip(overwrite: bool = False) -> pd.DataFrame:
         return pd.read_parquet(MSWEP_CACHE)
 
     basins = load_basin_ids()
-    print(f"解析 MSWEP CSV（{MSWEP_CSV.stat().st_size / 1e9:.2f} GB），仅取 86 个流域列...")
+    csv_path = resolve_mswep_csv()
+    print(f"解析 MSWEP CSV: {csv_path}")
+    print(f"  文件大小 {csv_path.stat().st_size / 1e9:.2f} GB，仅取 {len(basins)} 个流域列...")
     df = pd.read_csv(
-        MSWEP_CSV,
+        csv_path,
         usecols=["time"] + basins,
         dtype={b: "float32" for b in basins},
         parse_dates=["time"],
