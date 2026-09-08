@@ -26,6 +26,9 @@ from hydrodataset import StandardVariable
 from improved_camelsh_reader import ImprovedCAMELSHReader
 import HydroErr as he
 from mswep_loader import load_mswep_data, merge_forcing_with_mswep
+from parallel_multitask import (
+    architecture_label, build_multitask_model, model_metadata,
+)
 
 DEVICE = torch.device(
     "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -879,7 +882,10 @@ def run_ablation_experiment(flow_missing_ratio, waterlevel_missing_ratio,
         loader_type="train",
         seq_length=kwargs['sequence_length'],
     )
-    tr_loader = DataLoader(ds_train, batch_size=kwargs['batch_size'], shuffle=True)
+    train_generator = (torch.Generator().manual_seed(kwargs['model_seed'])
+                       if kwargs.get('model_seed') is not None else None)
+    tr_loader = DataLoader(ds_train, batch_size=kwargs['batch_size'], shuffle=True,
+                          generator=train_generator)
 
     means = ds_train.get_means()
     stds = ds_train.get_stds()
@@ -913,9 +919,14 @@ def run_ablation_experiment(flow_missing_ratio, waterlevel_missing_ratio,
     )
     test_loader = DataLoader(ds_test, batch_size=1000, shuffle=False)
 
-    # 创建模型
-    print("\n创建模型（WL2D）...")
-    model = MultiTaskLSTM(
+    # 模型种子与缺失掩膜种子分开；不改变旧 WL2D 入口的默认随机流程。
+    architecture = kwargs.get('architecture', 'wl2d')
+    model_seed = kwargs.get('model_seed')
+    if model_seed is not None:
+        set_random_seed(model_seed)
+    print(f"\n创建模型（{architecture_label(architecture)}）...")
+    model = build_multitask_model(
+        architecture, MultiTaskLSTM,
         input_size=kwargs['input_size'],
         hidden_size=kwargs['hidden_size'],
         dropout_rate=kwargs['dropout_rate'],
@@ -1014,6 +1025,8 @@ def run_ablation_experiment(flow_missing_ratio, waterlevel_missing_ratio,
     print(f"  平均 NSE (水位): {avg_nse_waterlevel:.4f} (基于 {len(test_nse_waterlevel_list)} 个流域)")
 
     results = {
+        'architecture': architecture,
+        'model_seed': model_seed,
         'flow_missing_ratio': flow_missing_ratio,
         'waterlevel_missing_ratio': waterlevel_missing_ratio,
         'experiment_name': experiment_name,
@@ -1059,12 +1072,12 @@ def aggregate_repeat_results(seed_results_list):
         'n_repeats': len(seed_results_list),
         # 径流 NSE
         'test_nse_flow_mean': float(np.mean(nse_flows)),
-        'test_nse_flow_std': float(np.std(nse_flows, ddof=1)) if len(nse_flows) > 1 else 0.0,
+        'test_nse_flow_std': float(np.std(nse_flows, ddof=1)) if len(nse_flows) > 1 else float('nan'),
         'test_nse_flow_min': float(np.min(nse_flows)),
         'test_nse_flow_max': float(np.max(nse_flows)),
         # 水位 NSE
         'test_nse_waterlevel_mean': float(np.mean(nse_waterlevels)),
-        'test_nse_waterlevel_std': float(np.std(nse_waterlevels, ddof=1)) if len(nse_waterlevels) > 1 else 0.0,
+        'test_nse_waterlevel_std': float(np.std(nse_waterlevels, ddof=1)) if len(nse_waterlevels) > 1 else float('nan'),
         'test_nse_waterlevel_min': float(np.min(nse_waterlevels)),
         'test_nse_waterlevel_max': float(np.max(nse_waterlevels)),
         # 其他
@@ -1077,8 +1090,9 @@ def aggregate_repeat_results(seed_results_list):
     }
 
 
-if __name__ == "__main__":
-    set_random_seed(1234)
+def main(architecture="wl2d", output_root=None, model_seed=1234):
+    architecture_label(architecture)
+    set_random_seed(model_seed)
     configure_chinese_font()
     print_device_info()
 
@@ -1088,6 +1102,13 @@ if __name__ == "__main__":
         FORCING_VARIABLES, ATTRIBUTE_VARIABLES,
         IMAGES_SAVE_PATH, REPORTS_SAVE_PATH, MODEL_SAVE_PATH
     )
+
+    if output_root is None and architecture == "parallel":
+        output_root = Path(__file__).resolve().parents[2] / "results" / "parallel" / "mcar"
+    if output_root is not None:
+        MODEL_SAVE_PATH = str(Path(output_root) / "models")
+        IMAGES_SAVE_PATH = str(Path(output_root) / "images")
+        REPORTS_SAVE_PATH = str(Path(output_root) / "reports")
 
     os.makedirs(IMAGES_SAVE_PATH, exist_ok=True)
     os.makedirs(REPORTS_SAVE_PATH, exist_ok=True)
@@ -1196,6 +1217,8 @@ if __name__ == "__main__":
 
     # 实验配置
     experiment_kwargs = {
+        'architecture': architecture,
+        'model_seed': model_seed if architecture == 'parallel' else None,
         'chosen_basins': chosen_basins,
         'default_range': default_range,
         'attrs_df': attrs_df,
@@ -1225,8 +1248,9 @@ if __name__ == "__main__":
         (0.5, 0.5, "both_missing_50pct"),
     ]
 
-    total_runs = len(experiments) * len(REPEAT_SEEDS)
-    print(f"\n将运行 {len(experiments)} 个场景 × {len(REPEAT_SEEDS)} 个种子 = {total_runs} 次实验")
+    total_runs = sum(1 if architecture == 'parallel' and f == 0 and w == 0
+                     else len(REPEAT_SEEDS) for f, w, _ in experiments)
+    print(f"\n将运行 {len(experiments)} 个场景，共 {total_runs} 次实验")
     for i, (flow_miss, wl_miss, name) in enumerate(experiments, 1):
         print(f"  {i}. {name}: 径流缺失{flow_miss:.0%}, 水位缺失{wl_miss:.0%}")
 
@@ -1241,9 +1265,13 @@ if __name__ == "__main__":
 
         seed_results = []
 
-        for seed_idx, mask_seed in enumerate(REPEAT_SEEDS):
+        # 固定模型种子下，0% 人工缺失的掩膜完全相同，只训练一次。
+        repeat_seeds = (REPEAT_SEEDS[:1] if architecture == 'parallel'
+                        and flow_missing_ratio == 0 and waterlevel_missing_ratio == 0
+                        else REPEAT_SEEDS)
+        for seed_idx, mask_seed in enumerate(repeat_seeds):
             run_name = f"{exp_name}_seed{mask_seed}"
-            print(f"\n--- 重复 {seed_idx+1}/{len(REPEAT_SEEDS)}，mask_seed={mask_seed} ---")
+            print(f"\n--- 重复 {seed_idx+1}/{len(repeat_seeds)}，mask_seed={mask_seed} ---")
 
             results, model, means, stds = run_ablation_experiment(
                 flow_missing_ratio=flow_missing_ratio,
@@ -1259,8 +1287,9 @@ if __name__ == "__main__":
             all_raw_results.append(results)
 
             # 保存单次模型
-            model_path = os.path.join(MODEL_SAVE_PATH, f'wl2d_ablation_{run_name}.pth')
+            model_path = os.path.join(MODEL_SAVE_PATH, f'{architecture}_ablation_{run_name}.pth')
             torch.save({
+                **model_metadata(model, architecture),
                 'model_state_dict': model.state_dict(),
                 'means': means,
                 'stds': stds,
@@ -1272,7 +1301,7 @@ if __name__ == "__main__":
         agg = aggregate_repeat_results(seed_results)
         all_aggregated_results.append(agg)
 
-        print(f"\n场景 [{exp_name}] 聚合结果 ({len(REPEAT_SEEDS)} 次重复):")
+        print(f"\n场景 [{exp_name}] 聚合结果 ({agg['n_repeats']} 次重复):")
         print(f"  NSE (径流): {agg['test_nse_flow_mean']:.4f} ± {agg['test_nse_flow_std']:.4f}")
         print(f"  NSE (水位): {agg['test_nse_waterlevel_mean']:.4f} ± {agg['test_nse_waterlevel_std']:.4f}")
 
@@ -1299,6 +1328,8 @@ if __name__ == "__main__":
         '径流缺失比例': r['flow_missing_ratio'],
         '水位缺失比例': r['waterlevel_missing_ratio'],
         'mask_seed': r['mask_seed'],
+        'architecture': r['architecture'],
+        'model_seed': r['model_seed'],
         '最佳Epoch': r['best_epoch'],
         '测试NSE_径流': r['test_nse_flow'],
         '测试NSE_水位': r['test_nse_waterlevel'],
@@ -1306,12 +1337,15 @@ if __name__ == "__main__":
         '流域数_水位': r['n_basins_waterlevel'],
     } for r in all_raw_results])
 
-    raw_csv = os.path.join(REPORTS_SAVE_PATH, "wl2d_ablation_repeat_raw_results.csv")
+    raw_csv = os.path.join(REPORTS_SAVE_PATH, f"{architecture}_ablation_repeat_raw_results.csv")
     raw_df.to_csv(raw_csv, index=False, encoding='utf-8-sig')
     print(f"\n已保存原始结果CSV: {raw_csv}")
 
     # 2. 聚合结果
     agg_df = pd.DataFrame([{
+        'architecture': architecture,
+        'model_seed': model_seed if architecture == 'parallel' else None,
+        'uncertainty_source': 'mask_seed' if architecture == 'parallel' else 'legacy_mixed_randomness',
         '实验名称': a['experiment_name'],
         '径流缺失比例': a['flow_missing_ratio'],
         '水位缺失比例': a['waterlevel_missing_ratio'],
@@ -1329,7 +1363,7 @@ if __name__ == "__main__":
         '流域数_水位': a['n_basins_waterlevel'],
     } for a in all_aggregated_results])
 
-    agg_csv = os.path.join(REPORTS_SAVE_PATH, "wl2d_ablation_repeat_aggregated_results.csv")
+    agg_csv = os.path.join(REPORTS_SAVE_PATH, f"{architecture}_ablation_repeat_aggregated_results.csv")
     agg_df.to_csv(agg_csv, index=False, encoding='utf-8-sig')
     print(f"已保存聚合结果CSV: {agg_csv}")
 
@@ -1343,6 +1377,8 @@ if __name__ == "__main__":
                       if a['flow_missing_ratio'] == 0 and a['waterlevel_missing_ratio'] > 0]
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    if architecture == 'parallel':
+        fig.suptitle(f'双头多任务；模型种子 {model_seed}；误差棒为不同缺失掩膜的标准差', fontsize=14)
 
     # 图1：径流任务 NSE vs 缺失比例（含误差棒）
     ax1 = axes[0, 0]
@@ -1358,14 +1394,19 @@ if __name__ == "__main__":
         yerr = [a['test_nse_flow_std'] for a in wl_missing_agg]
         ax1.errorbar(x, y, yerr=yerr, fmt='s-', linewidth=2, markersize=8,
                      capsize=5, capthick=1.5, label='径流完整+水位缺失', color='tab:orange')
+    baseline_label = f"基线 {baseline_agg['test_nse_flow_mean']:.3f}"
+    if baseline_agg['n_repeats'] > 1:
+        baseline_label += f"±{baseline_agg['test_nse_flow_std']:.3f}"
+        ax1.fill_between(
+            [0, 55],
+            baseline_agg['test_nse_flow_mean'] - baseline_agg['test_nse_flow_std'],
+            baseline_agg['test_nse_flow_mean'] + baseline_agg['test_nse_flow_std'],
+            alpha=0.1, color='k'
+        )
+    else:
+        baseline_label += "（单次）"
     ax1.axhline(y=baseline_agg['test_nse_flow_mean'], color='k', linestyle='--',
-                alpha=0.6, label=f"基线 {baseline_agg['test_nse_flow_mean']:.3f}±{baseline_agg['test_nse_flow_std']:.3f}")
-    ax1.fill_between(
-        [0, 55],
-        baseline_agg['test_nse_flow_mean'] - baseline_agg['test_nse_flow_std'],
-        baseline_agg['test_nse_flow_mean'] + baseline_agg['test_nse_flow_std'],
-        alpha=0.1, color='k'
-    )
+                alpha=0.6, label=baseline_label)
     ax1.set_xlabel('缺失比例 (%)', fontsize=11)
     ax1.set_ylabel('径流预测 NSE', fontsize=11)
     ax1.set_title(f'径流任务性能 vs 标签缺失（{len(REPEAT_SEEDS)}次重复）', fontsize=13)
@@ -1386,14 +1427,19 @@ if __name__ == "__main__":
         yerr = [a['test_nse_waterlevel_std'] for a in wl_missing_agg]
         ax2.errorbar(x, y, yerr=yerr, fmt='s-', linewidth=2, markersize=8,
                      capsize=5, capthick=1.5, label='径流完整+水位缺失', color='tab:orange')
+    baseline_label = f"基线 {baseline_agg['test_nse_waterlevel_mean']:.3f}"
+    if baseline_agg['n_repeats'] > 1:
+        baseline_label += f"±{baseline_agg['test_nse_waterlevel_std']:.3f}"
+        ax2.fill_between(
+            [0, 55],
+            baseline_agg['test_nse_waterlevel_mean'] - baseline_agg['test_nse_waterlevel_std'],
+            baseline_agg['test_nse_waterlevel_mean'] + baseline_agg['test_nse_waterlevel_std'],
+            alpha=0.1, color='k'
+        )
+    else:
+        baseline_label += "（单次）"
     ax2.axhline(y=baseline_agg['test_nse_waterlevel_mean'], color='k', linestyle='--',
-                alpha=0.6, label=f"基线 {baseline_agg['test_nse_waterlevel_mean']:.3f}±{baseline_agg['test_nse_waterlevel_std']:.3f}")
-    ax2.fill_between(
-        [0, 55],
-        baseline_agg['test_nse_waterlevel_mean'] - baseline_agg['test_nse_waterlevel_std'],
-        baseline_agg['test_nse_waterlevel_mean'] + baseline_agg['test_nse_waterlevel_std'],
-        alpha=0.1, color='k'
-    )
+                alpha=0.6, label=baseline_label)
     ax2.set_xlabel('缺失比例 (%)', fontsize=11)
     ax2.set_ylabel('水位预测 NSE', fontsize=11)
     ax2.set_title(f'水位任务性能 vs 标签缺失（{len(REPEAT_SEEDS)}次重复）', fontsize=13)
@@ -1439,9 +1485,13 @@ if __name__ == "__main__":
 
     plt.tight_layout()
     comparison_file = os.path.join(
-        IMAGES_SAVE_PATH, "wl2d_ablation_repeat_comparison.png"
+        IMAGES_SAVE_PATH, f"{architecture}_ablation_repeat_comparison.png"
     )
     plt.savefig(comparison_file, dpi=300, bbox_inches='tight')
     print(f"已保存对比图: {comparison_file}")
 
     print("\n消融实验（多次重复）完成！")
+
+
+if __name__ == "__main__":
+    main()

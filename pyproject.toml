@@ -11,6 +11,7 @@ dependencies = [
   "numpy>=1.23,<2.0",
   "pandas>=1.5",
   "xarray>=2023.1",
+  "scipy>=1.10",          # 洪峰事件识别 find_peaks、配对 Wilcoxon 检验
   "torch>=2.1",
   "tqdm>=4.66",
   "matplotlib>=3.6",

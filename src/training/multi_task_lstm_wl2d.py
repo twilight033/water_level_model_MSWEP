@@ -17,6 +17,9 @@ from hydrodataset import StandardVariable
 from improved_camelsh_reader import ImprovedCAMELSHReader
 import HydroErr as he
 from mswep_loader import load_mswep_data, merge_forcing_with_mswep
+from parallel_multitask import (
+    architecture_label, build_multitask_model, model_metadata,
+)
 
 DEVICE = torch.device(
     "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -1205,8 +1208,9 @@ def filter_basins_with_valid_data(camelsh_reader, basin_list, time_range, max_ba
     return valid_basins
 
 
-if __name__ == "__main__":
-    set_random_seed(1234)
+def main(architecture="wl2d", output_root=None, model_seed=1234):
+    architecture_label(architecture)
+    set_random_seed(model_seed)
     configure_chinese_font()
     
     # 打印设备信息
@@ -1220,6 +1224,13 @@ if __name__ == "__main__":
         IMAGES_SAVE_PATH, REPORTS_SAVE_PATH, MODEL_SAVE_PATH
     )
     
+    if output_root is None and architecture == "parallel":
+        output_root = Path(__file__).resolve().parents[2] / "results" / "parallel" / "main"
+    if output_root is not None:
+        MODEL_SAVE_PATH = str(Path(output_root) / "models")
+        IMAGES_SAVE_PATH = str(Path(output_root) / "images")
+        REPORTS_SAVE_PATH = str(Path(output_root) / "reports")
+
     # 创建输出文件夹
     import os
     os.makedirs(IMAGES_SAVE_PATH, exist_ok=True)
@@ -1373,6 +1384,8 @@ if __name__ == "__main__":
             var_lst=[StandardVariable.WATER_LEVEL]
         )
     except Exception as e:
+        if architecture == "parallel":
+            raise RuntimeError("真实水位数据加载失败，双头多任务实验已停止") from e
         print(f"警告: 无法加载水位数据: {e}")
         print("将使用模拟水位数据进行演示...")
         waterlevel_ds = flow_ds.copy()
@@ -1420,7 +1433,9 @@ if __name__ == "__main__":
         loader_type="train",
         seq_length=sequence_length,
     )
-    tr_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True)
+    train_generator = torch.Generator().manual_seed(model_seed) if architecture == "parallel" else None
+    tr_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True,
+                          generator=train_generator)
     
     # 验证数据集
     means = ds_train.get_means()
@@ -1456,8 +1471,8 @@ if __name__ == "__main__":
     test_batch_size = 1000
     test_loader = DataLoader(ds_test, batch_size=test_batch_size, shuffle=False)
     
-    # ==================== 6. 创建模型（WL2D 水位→径流级联架构）====================
-    print("\n正在创建多任务LSTM模型（WL2D 水位→径流级联架构）...")
+    # ==================== 6. 创建所选架构 ====================
+    print(f"\n正在创建模型（{architecture_label(architecture)}）...")
     input_size = len(chosen_attrs_vars) + len(chosen_forcing_vars)
     hidden_size = 64   # LSTM 隐藏层大小
     dropout_rate = 0.2 # Dropout 率
@@ -1468,7 +1483,8 @@ if __name__ == "__main__":
     # 设置任务权重（可以根据需要调整）
     task_weights = {'flow': 1.0, 'waterlevel': 1.0}
 
-    model = MultiTaskLSTM(
+    model = build_multitask_model(
+        architecture, MultiTaskLSTM,
         input_size=input_size,
         hidden_size=hidden_size,
         dropout_rate=dropout_rate,
@@ -1482,8 +1498,9 @@ if __name__ == "__main__":
 
     print(f"模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     print(f"设备: {DEVICE}")
-    print(f"水位→径流投影维度: {wl_proj_size}")
-    print(f"stop_gradient: {stop_gradient}")
+    if architecture == "wl2d":
+        print(f"水位→径流投影维度: {wl_proj_size}")
+        print(f"stop_gradient: {stop_gradient}")
     
     # ==================== 7. 训练模型（带早停机制）====================
     print("\n开始训练...")
@@ -1681,7 +1698,7 @@ if __name__ == "__main__":
         plt.tight_layout()
         
         # 保存图片
-        output_file = os.path.join(IMAGES_SAVE_PATH, f"wl2d_results_basin_{basin}.png")
+        output_file = os.path.join(IMAGES_SAVE_PATH, f"{architecture}_results_basin_{basin}.png")
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         print(f"已保存图片: {output_file}")
 
@@ -1704,14 +1721,16 @@ if __name__ == "__main__":
     axes[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
-    training_curve_file = os.path.join(IMAGES_SAVE_PATH, "wl2d_training_curves.png")
+    training_curve_file = os.path.join(IMAGES_SAVE_PATH, f"{architecture}_training_curves.png")
     plt.savefig(training_curve_file, dpi=300, bbox_inches='tight')
     print(f"已保存训练曲线: {training_curve_file}")
     
     # ==================== 10. 保存模型 ====================
     print("\n正在保存模型...")
-    model_path = os.path.join(MODEL_SAVE_PATH, 'wl2d_lstm_model.pth')
+    model_path = os.path.join(MODEL_SAVE_PATH, f'{architecture}_lstm_model.pth')
     torch.save({
+        **model_metadata(model, architecture),
+        'model_seed': model_seed,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'means': means,
@@ -1724,3 +1743,6 @@ if __name__ == "__main__":
     
     print("\n训练完成！")
 
+
+if __name__ == "__main__":
+    main()

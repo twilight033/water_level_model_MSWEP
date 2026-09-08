@@ -1,5 +1,12 @@
 CAMELS/
-data/
+# data/ 整体不入库，但冻结划分与覆盖率统计必须入库：
+# 它们是全部模型可比性的契约，两台机器必须用同一份，不能各自重算。
+# 体积仅 0.3 MB 的纯文本 JSON/CSV。
+data/*
+!data/splits/
+!data/coverage/
+# 掩膜可由 mask_seed 确定性重建（crc32 子种子，跨进程一致），不必入库
+data/splits/masks/
 qualifiers_cache/
 qualifiers_cache_per_basin_train/
 qualifiers_cache_full/
@@ -26,8 +33,11 @@ uv.lock
 .DS_Store
 Thumbs.db
 
-config.py
-86basin_ids.txt
+# config.py 含机器相关的 CAMELSH 路径，但也含 ATTRIBUTE_VARIABLES 等
+# 必须跨机器一致的定义，因此入库；换机器时只需改 CAMELSH_DATA_PATH
+# config.py
+# 86basin_ids.txt 是研究区流域清单，跨机器必须一致，入库
+# 86basin_ids.txt
 CLAUDE.md
 .claude/
 hydro-multitask-paper/
@@ -35,3 +45,6 @@ src/training/improved_camelsh_reader.py
 src/training/mswep_loader.py
 .codegraph/
 outputs/
+# Codex 工具产生的临时脚本，非项目代码
+.codex_artifacts/
+.codex_tmp/
