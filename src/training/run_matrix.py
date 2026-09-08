@@ -44,6 +44,11 @@ SCENARIOS = {
                          ("single_flow", "single_waterlevel", "dual_head")),
     "q50_mcar":         ({"flow": 0.50},                  "mcar",    True,  ("single_flow", "dual_head")),
     "q50_seg_uniform":  ({"flow": 0.50},                  "segment", False, ("single_flow", "dual_head")),
+    # 按流域留出：论文主命题——某些流域根本没有径流观测，只有廉价的水位
+    # 观测，问水位监督能否顶上。ratio 在此表示被留出的流域比例。
+    "q_holdout30":      ({"flow": 0.30},          "basin_holdout", True,  ("single_flow", "dual_head")),
+    "q_holdout50":      ({"flow": 0.50},          "basin_holdout", True,  ("single_flow", "dual_head")),
+    "q_holdout70":      ({"flow": 0.70},          "basin_holdout", True,  ("single_flow", "dual_head")),
 }
 
 
@@ -81,9 +86,11 @@ def build_matrix(scale: str = "full") -> list:
     for scenario, (_, _, _, models) in SCENARIOS.items():
         if scenario == "complete":
             continue
+        # 按流域留出是论文主命题，用满 3 个掩膜种子（决定哪些流域被留出）；
         # 机制对照与季节性对照用较少的掩膜种子
         mask_seeds = miss_mask_seeds if scenario in (
-            "q30_seg", "q50_seg", "q70_seg", "h50_seg", "both50_seg") else miss_mask_seeds[:2]
+            "q30_seg", "q50_seg", "q70_seg", "h50_seg", "both50_seg",
+            "q_holdout30", "q_holdout50", "q_holdout70") else miss_mask_seeds[:2]
         for arch in models:
             for ms in miss_model_seeds:
                 for xs in mask_seeds:
@@ -177,6 +184,15 @@ def run_one(prepared, entry: dict, force: bool = False, verbose: bool = False) -
         metrics_df.insert(1, col, entry[col])
     metrics_df["model_seed"] = entry["model_seed"]
     metrics_df["mask_seed"] = entry["mask_seed"]
+    # 按流域留出时标出哪些流域的该任务训练标签被整段删除，
+    # 后续分析要分开报告留出流域与保留流域的表现
+    if mechanism == "basin_holdout" and mask_stats:
+        held = {t: set(v.get("held_out_basins", []))
+                for t, v in mask_stats["per_task"].items()}
+        metrics_df["held_out"] = [
+            row.basin in held.get(row.task, set())
+            for row in metrics_df.itertuples()
+        ]
     metrics_df.to_csv(out_dir / "metrics.csv", index=False, encoding="utf-8-sig")
     aggregate(metrics_df).to_csv(out_dir / "aggregate.csv", index=False, encoding="utf-8-sig")
 

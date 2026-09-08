@@ -126,6 +126,49 @@ def missing_degradation_table(metrics: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values(["task", "scenario", "architecture"]).reset_index(drop=True)
 
 
+def holdout_table(metrics: pd.DataFrame) -> pd.DataFrame:
+    """论文主命题的结果表：某些流域完全没有径流训练标签时，水位监督能否顶上。
+
+    对每个留出情景，分别在**被留出流域**和**保留流域**上比较单任务 Q 与
+    双头模型的径流表现，并对逐流域差值做配对检验。被留出流域上的差值才是
+    "用廉价水位数据替代昂贵径流数据"的直接证据。
+    """
+    if "held_out" not in metrics.columns:
+        return pd.DataFrame()
+    sub = metrics[metrics["scenario"].str.startswith("q_holdout", na=False)]
+    sub = sub[sub["task"] == "flow"]
+    if sub.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for scenario, grp in sub.groupby("scenario"):
+        for group_name, part in (("被留出流域", grp[grp["held_out"] == True]),
+                                 ("保留流域", grp[grp["held_out"] == False])):
+            if part.empty:
+                continue
+            dual = part[part["architecture"] == "dual_head"].groupby("basin")["nse"].mean()
+            base = part[part["architecture"] == "single_flow"].groupby("basin")["nse"].mean()
+            common = dual.index.intersection(base.index)
+            if len(common) < 3:
+                continue
+            diff = (dual.loc[common] - base.loc[common]).to_numpy()
+            test = paired_test(diff)
+            rows.append({
+                "scenario": scenario, "basin_group": group_name,
+                "n_basins": len(common),
+                "nse_single_flow": float(base.loc[common].mean()),
+                "nse_dual_head": float(dual.loc[common].mean()),
+                "mean_gain": test.get("mean_diff"),
+                "ci_lo": test.get("mean_ci_lo"), "ci_hi": test.get("mean_ci_hi"),
+                "median_gain": test.get("median_diff"),
+                "wilcoxon_p": test.get("wilcoxon_p"),
+                "cohens_d_paired": test.get("cohens_d_paired"),
+                "n_basins_improved": test.get("n_basins_improved"),
+                "n_basins_worsened": test.get("n_basins_worsened"),
+            })
+    return pd.DataFrame(rows).sort_values(["scenario", "basin_group"]).reset_index(drop=True)
+
+
 def short_test_sensitivity(metrics: pd.DataFrame) -> pd.DataFrame:
     """含 / 不含 4 个短测试期流域的聚合对比（按用户决定：保留但单独标注）。"""
     payload = load_splits()
@@ -175,6 +218,7 @@ def main():
         "main_experiment.csv": main_experiment_table(metrics),
         "paired_tests.csv": paired_tests_table(metrics),
         "missing_degradation.csv": missing_degradation_table(metrics),
+        "holdout_substitution.csv": holdout_table(metrics),
         "short_test_sensitivity.csv": short_test_sensitivity(metrics),
         "training_budget.csv": training_budget_table(runs),
     }
@@ -195,6 +239,15 @@ def main():
         cols = [c for c in ("architecture", "task", "n_seeds", "nse_mean",
                             "nse_sd_across_seeds", "kge_mean") if c in main_tab]
         print(main_tab[cols].to_string(index=False))
+
+    hold = outputs.get("holdout_substitution.csv")
+    if hold is not None and not hold.empty:
+        print("
+按流域留出（论文主命题：水位监督能否替代缺失的径流标签）:")
+        cols = [c for c in ("scenario", "basin_group", "n_basins", "nse_single_flow",
+                            "nse_dual_head", "mean_gain", "ci_lo", "ci_hi",
+                            "wilcoxon_p") if c in hold]
+        print(hold[cols].to_string(index=False))
 
     paired = outputs["paired_tests.csv"]
     if not paired.empty:

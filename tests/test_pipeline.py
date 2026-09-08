@@ -123,6 +123,39 @@ class MaskingTests(unittest.TestCase):
             got = stats["per_task"]["flow"]["realized_ratio_mean"]
             self.assertAlmostEqual(got, ratio, places=3)
 
+    def test_basin_holdout_removes_whole_basins_only(self):
+        """按流域留出：被留出流域该任务训练标签全删，其余流域一个不动，
+        另一任务完全不受影响。"""
+        prep = prepared()
+        hidden, stats = build_hidden(prep, {"flow": 0.5},
+                                     mechanism="basin_holdout", mask_seed=42)
+        assert_train_only(prep, hidden)
+        held = set(stats["per_task"]["flow"]["held_out_basins"])
+        self.assertEqual(len(held), round(0.5 * len(prep.splits["splits"])))
+        self.assertNotIn("waterlevel", hidden)      # 水位标签一个不删
+
+        for basin in list(prep.splits["splits"])[:20]:
+            bi = prep.basin_index[basin]
+            lo, hi = prep.split_range(basin, "train")
+            window = prep.targets["flow"][bi, lo:hi + 1]
+            valid = ~np.isnan(window)
+            masked = hidden["flow"][bi, lo:hi + 1]
+            if basin in held:
+                self.assertTrue(bool((masked == valid).all()),
+                                f"{basin} 被留出但未删干净")
+            else:
+                self.assertFalse(bool(masked.any()), f"{basin} 未被留出却被删了标签")
+
+    def test_basin_holdout_keeps_waterlevel_supervision(self):
+        """留出情景下水位监督必须完好——这是替代命题成立的前提。"""
+        prep = prepared()
+        base = WindowDataset(prep, "train", SEQ, 8).label_counts()
+        hidden, _ = build_hidden(prep, {"flow": 0.7},
+                                 mechanism="basin_holdout", mask_seed=42)
+        after = WindowDataset(prep, "train", SEQ, 8, hidden=hidden).label_counts()
+        self.assertEqual(after["waterlevel"], base["waterlevel"])
+        self.assertLess(after["flow"], base["flow"])
+
     def test_mask_is_reproducible_across_calls(self):
         """掩膜种子必须跨调用（以及跨进程）稳定，否则配对比较不成立。"""
         prep = prepared()

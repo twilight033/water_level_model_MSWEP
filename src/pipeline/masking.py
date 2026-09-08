@@ -32,7 +32,7 @@ STEP_HOURS = 3
 FAULT_STATS_DIR = _ROOT / "src" / "missing_period" / "output"
 FAULT_CSV = {"flow": FAULT_STATS_DIR / "fault_recovery_Q.csv",
              "waterlevel": FAULT_STATS_DIR / "fault_recovery_H.csv"}
-MECHANISMS = ("mcar", "segment")
+MECHANISMS = ("mcar", "segment", "basin_holdout")
 
 
 def _subseed(mask_seed: int, task: str, basin: str) -> int:
@@ -167,6 +167,72 @@ def _hide_segments(rng, valid_pos: np.ndarray, budget: int,
                        "start_months": start_months, "attempts": attempts}
 
 
+def _build_basin_holdout(prepared, active: dict, hidden: dict,
+                         mask_seed: int, ratios: dict) -> tuple:
+    """按流域留出：抽取一部分流域，把它们该任务的训练标签**整段**删除。
+
+    这是"某些流域根本没有径流观测、只有廉价的水位观测"这一现实情形的
+    直接模拟，与在所有流域上均匀稀疏化是两种不同的缺失结构。ratio 在此
+    表示**被留出的流域比例**，而不是标签比例。
+
+    关于归一化的一个明确假设
+    ------------------------
+    目标仍按逐流域的观测均值与标准差归一化，而这两个统计量对一个"完全
+    没有径流观测"的流域本来是拿不到的。因此本设定实际对应的是"知道量级、
+    缺少连续时序"——例如只有少数几次实测流量、足以定出均值与变幅，但没有
+    连续记录。论文中必须如实这样表述，不能说成完全无资料流域。
+    """
+    basins = list(prepared.splits["splits"])
+    rows, held = [], {}
+    for task, ratio in active.items():
+        rng = np.random.default_rng(_subseed(mask_seed, f"holdout_{task}", "all"))
+        n_hold = int(round(len(basins) * ratio))
+        chosen = sorted(rng.choice(len(basins), size=n_hold, replace=False).tolist())
+        held[task] = [basins[i] for i in chosen]
+
+        for basin in basins:
+            bi = prepared.basin_index[basin]
+            lo, hi = _train_slice(prepared, basin)
+            if hi < lo:
+                continue
+            window = prepared.targets[task][bi, lo:hi + 1]
+            valid_pos = np.flatnonzero(~np.isnan(window)) + lo
+            is_held = basin in held[task]
+            if is_held:
+                hidden[task][bi, valid_pos] = True
+            rows.append({
+                "task": task, "basin": basin, "mechanism": "basin_holdout",
+                "target_ratio": ratio, "n_valid_train": int(valid_pos.size),
+                "n_hidden": int(valid_pos.size) if is_held else 0,
+                "realized_ratio": 1.0 if is_held else 0.0,
+                "held_out": bool(is_held),
+                "n_segments": 0, "n_trimmed_steps": 0,
+            })
+
+    per_task = {}
+    for task, ratio in active.items():
+        sub = [r for r in rows if r["task"] == task]
+        per_task[task] = {
+            "target_ratio": ratio,
+            "n_basins_held_out": len(held[task]),
+            "n_basins_total": len(basins),
+            "realized_basin_ratio": len(held[task]) / len(basins),
+            "n_hidden_total": int(sum(r["n_hidden"] for r in sub)),
+            "n_valid_train_total": int(sum(r["n_valid_train"] for r in sub)),
+            "held_out_basins": held[task],
+        }
+    stats = {
+        "meta": {"mechanism": "basin_holdout", "mask_seed": mask_seed,
+                 "ratios": dict(ratios),
+                 "scope": "仅训练段；验证与测试保持原始完整",
+                 "note": "ratio 表示被留出的流域比例；归一化仍用观测统计量，"
+                         "对应'知道量级、缺少连续时序'的设定"},
+        "per_task": per_task,
+        "per_basin": rows,
+    }
+    return hidden, stats
+
+
 def build_hidden(prepared, ratios: dict, mechanism: str = "segment",
                  mask_seed: int = 42, seasonal: bool = True) -> tuple:
     """构造训练段人工缺失掩膜。
@@ -202,6 +268,10 @@ def build_hidden(prepared, ratios: dict, mechanism: str = "segment",
 
     n_basin, n_time = prepared.targets[TASKS[0]].shape
     hidden = {t: np.zeros((n_basin, n_time), dtype=bool) for t in active}
+
+    if mechanism == "basin_holdout":
+        return _build_basin_holdout(prepared, active, hidden, mask_seed, ratios)
+
     lengths, month_probs = {}, {}
     if mechanism == "segment":
         for t in active:
