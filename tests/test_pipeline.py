@@ -308,14 +308,23 @@ class AttributeSourceTests(unittest.TestCase):
                     err_msg=f"连续属性 {col} 与 hydrodataset 不一致")
 
     def test_extended_is_strict_superset_of_base(self):
-        from pipeline.attribute_sources import get_attribute_table
+        """扩展集必须是基础集的严格超集，且共有列逐值相同。
 
-        base, _ = get_attribute_table("base")
-        ext, _ = get_attribute_table("extended")
+        两边都用 build_attribute_table 现算，**不读缓存**：这是代码性质，与磁盘上
+        那份缓存的来历无关。此前一边读缓存、一边重建，在缓存由早期 hydrodataset
+        路径生成的机器上会因 one-hot 列名不同而误报失败。
+        """
+        from pipeline.attribute_sources import build_attribute_table
+        from pipeline.paths import load_basin_ids
+
+        basins = load_basin_ids()
+        base, _ = build_attribute_table("base", basins)
+        ext, _ = build_attribute_table("extended", basins)
         self.assertTrue(set(base.columns) < set(ext.columns))
         for col in base.columns:
             np.testing.assert_allclose(base[col].to_numpy(float),
-                                       ext[col].to_numpy(float), rtol=1e-6, atol=1e-6)
+                                       ext[col].to_numpy(float), rtol=1e-6, atol=1e-6,
+                                       err_msg=f"共有列 {col} 在两套属性集中取值不同")
 
     def test_no_flow_derived_attributes(self):
         """由实测径流导出的属性绝不能进入输入——留出情景假设该流域无径流数据。"""
