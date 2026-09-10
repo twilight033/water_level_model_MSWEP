@@ -13,7 +13,10 @@ import pandas as pd
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / "src"), str(ROOT)]
+# 根目录必须排在 src 之前：src/config.py 是一份过时副本（硬编码路径、不读环境
+# 变量），若排在前面会把 `import config` 劫持过去，导致测试与训练读到不同的
+# 数据路径——曾因此在换机器时表现为测试静默卡死。
+sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from models.lstm_models import ARCHITECTURES, build_model  # noqa: E402
 from pipeline.dataset import PreparedData, WindowDataset  # noqa: E402
@@ -232,35 +235,32 @@ class TimeAxisTests(unittest.TestCase):
         self.assertEqual(target_time - last_input, pd.Timedelta(hours=3))
 
 
-def _attribute_data_available() -> bool:
-    """扩展属性集是否可得：已有缓存，或原始数据可达可重建。
+def _raw_attributes_reachable() -> bool:
+    """原始属性 CSV 是否可达。
 
-    没有这层保护时，缓存缺失会让用例落进"从原始 CSV 重建"的分支；若
-    CAMELSH_DATA_PATH 指向未挂载的映射盘，os.stat 会阻塞很久，整个测试静默
-    卡死且没有任何提示——这正是部署到另一台机器时实际踩到的坑。
+    下面两条用例**故意绕开缓存、直接从 CSV 重建**，因此判据是原始数据可不可达，
+    而不是缓存在不在——早先按缓存判断，结果在缓存齐全但原始数据不可达的机器上
+    依旧报 FileNotFoundError。探测带超时，未挂载的映射盘不会让测试挂死。
     """
-    from pipeline.attribute_sources import cache_path
-    from pipeline.paths import path_reachable
-
-    if cache_path("base").exists() and cache_path("extended").exists():
-        return True
     try:
         from config import CAMELSH_DATA_PATH
+        from pipeline.paths import path_reachable
         return path_reachable(CAMELSH_DATA_PATH) is True
     except Exception:                              # noqa: BLE001
         return False
 
 
-_requires_attribute_data = unittest.skipUnless(
-    _attribute_data_available(),
-    "缺少属性缓存且原始数据不可达；请先运行 src/pipeline/attribute_sources.py",
+_requires_raw_attributes = unittest.skipUnless(
+    _raw_attributes_reachable(),
+    "原始属性 CSV 不可达（这两条用例需从 CSV 重建）；"
+    "设置 CAMELSH_DATA_PATH 后可启用",
 )
 
 
-@_requires_attribute_data
 class AttributeSourceTests(unittest.TestCase):
-    """直读 CSV 必须与既有缓存完全一致，且不得引入径流导出的属性。"""
+    """直读 CSV 的正确性，以及扩展集不得引入径流导出的属性。"""
 
+    @_requires_raw_attributes
     def test_base_set_matches_hydrodataset(self):
         """直读 CSV 必须复现 hydrodataset 给出的同一批数值。
 
@@ -307,6 +307,7 @@ class AttributeSourceTests(unittest.TestCase):
                     rtol=1e-6, atol=1e-6,
                     err_msg=f"连续属性 {col} 与 hydrodataset 不一致")
 
+    @_requires_raw_attributes
     def test_extended_is_strict_superset_of_base(self):
         """扩展集必须是基础集的严格超集，且共有列逐值相同。
 

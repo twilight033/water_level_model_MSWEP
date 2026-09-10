@@ -105,27 +105,33 @@ class PreparedData:
 
         # 静态属性归一化；one-hot 列的 mean=0/std=1，等于不做变换
         self.attr_set = attr_set
-        attr_arr, attr_cols, _ = load_attributes(basins, attr_set=attr_set)
-        # 属性缓存可能是早期用 hydrodataset 建的，分类属性的类别码编号不同会让
-        # one-hot 列名对不上 norm_stats（后者随仓库分发、用当前代码生成）。
-        # 逐值已验证两种来源完全相同，仅命名有别，因此直接按当前代码重建缓存是
-        # 安全的；否则会以 KeyError 的形式在下一行崩掉，且提示不知所云。
-        missing = [c for c in attr_cols if c not in self.stats["attr"]]
-        if missing:
-            from pipeline.attribute_sources import get_attribute_table
-            print(f"[属性缓存不兼容] 以下列不在 norm_stats 中: {missing}\n"
-                  f"  该缓存应为早期版本生成，正按当前代码重建（取值不变，仅统一命名）…")
-            get_attribute_table(attr_set, overwrite=True, basins=basins)
-            attr_arr, attr_cols, _ = load_attributes(basins, attr_set=attr_set)
-            still_missing = [c for c in attr_cols if c not in self.stats["attr"]]
-            if still_missing:
-                raise KeyError(
-                    f"重建后仍有属性列不在 norm_stats 中: {still_missing}\n"
-                    f"请重新生成统计量：python -X utf8 src/pipeline/normalization.py")
+        attr_arr, attr_cols, attr_onehot = load_attributes(basins, attr_set=attr_set)
         # 物理尺度回归需要未标准化的 area 与 p_mean，故原值一并保留
         self.attrs_raw = pd.DataFrame(attr_arr, index=basins, columns=attr_cols)
-        a_mean = np.array([self.stats["attr"][c]["mean"] for c in attr_cols], dtype="float32")
-        a_std = np.array([self.stats["attr"][c]["std"] for c in attr_cols], dtype="float32")
+        # one-hot 列不做标准化，统计量恒为 (0, 1)，因此不必出现在 norm_stats 里。
+        # 这一点很关键：属性缓存可能是早期用 hydrodataset 建的，分类属性的类别码
+        # 编号不同会让 one-hot 列名（如 geol_class_1st__1/2/3 对 __0/1/2）与随仓库
+        # 分发的 norm_stats 对不上。逐值已验证两种来源取值完全相同、仅命名有别，
+        # 而模型只把它们当作输入列、标签本身无意义——按 (0, 1) 直接放行即可，
+        # 既不必读原始数据重建缓存（换机器时原始数据未必可达），也不引入口径差异。
+        means, stds, unknown = [], [], []
+        onehot = set(attr_onehot)
+        for col in attr_cols:
+            stat = self.stats["attr"].get(col)
+            if stat is not None:
+                means.append(stat["mean"])
+                stds.append(stat["std"])
+            elif col in onehot or "__" in col:
+                means.append(0.0)
+                stds.append(1.0)
+            else:
+                unknown.append(col)
+        if unknown:
+            raise KeyError(
+                f"以下连续属性列不在 norm_stats 中: {unknown}；"
+                f"请重新生成统计量：python -X utf8 src/pipeline/normalization.py")
+        a_mean = np.array(means, dtype="float32")
+        a_std = np.array(stds, dtype="float32")
         self.attrs = ((attr_arr - a_mean) / a_std).astype("float32")
         self.attr_columns = attr_cols
 

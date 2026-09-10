@@ -1,123 +1,26 @@
+"""转发到项目根目录的 config.py，消除重复配置。
+
+本文件原是根目录 config.py 的一份副本。两份并存时，`import config` 解析到哪一份
+取决于 sys.path 的顺序：管线模块把根目录排在前面、测试文件曾把 src 排在前面，
+于是训练读到支持环境变量的新版、测试读到硬编码路径的旧版。换机器时表现为
+"按说明设了 CAMELSH_DATA_PATH 却不生效"，进而在未挂载的盘上静默卡死。
+
+现在无论从哪个 sys.path 顺序进来，取值都来自同一处。按文件路径显式加载，
+不走模块名解析，避免自我导入。
 """
-CAMELSH数据集配置文件
 
-在这里修改您的CAMELSH数据路径和其他配置
-"""
+import importlib.util as _importlib_util
+from pathlib import Path as _Path
 
-# ==================== CAMELSH数据路径配置 ====================
-# 修改为您的实际CAMELSH数据路径
-# 支持相对路径和绝对路径
-CAMELSH_DATA_PATH = "F:/data"
-CAMELSUS_DATA_PATH = "D:/download/camels/camels_us"
-# 注意：确保路径下有CAMELSH目录，包含以下结构：
-# F:/data/CAMELSH/
-# ├── attributes/
-# ├── timeseries/
-# ├── shapefiles/
-# └── 其他相关文件
+_ROOT_CONFIG = _Path(__file__).resolve().parents[1] / "config.py"
 
-# 示例路径（取消注释并修改为您的路径）:
-# CAMELSH_DATA_PATH = "D:/data/camelsh"
-# CAMELSH_DATA_PATH = "/home/user/data/camelsh"
-# CAMELSH_DATA_PATH = "../camelsh_dataset"
+_spec = _importlib_util.spec_from_file_location("_root_config", _ROOT_CONFIG)
+if _spec is None or _spec.loader is None:          # pragma: no cover - 结构损坏
+    raise ImportError(f"无法加载根目录配置: {_ROOT_CONFIG}")
+_root_config = _importlib_util.module_from_spec(_spec)
+_spec.loader.exec_module(_root_config)
 
-# ==================== 模型训练配置 ====================
-# 流域数量（用于测试）
-NUM_BASINS = 86
+globals().update({k: v for k, v in vars(_root_config).items()
+                  if not k.startswith("_")})
 
-# 可用流域列表（经过验证有完整数据文件的流域）
-AVAILABLE_BASINS = [
-    '01011000', '01017000', '01017060', '01017290', '01017960',
-    '01018000', '01018009'  # 可以根据需要添加更多
-]
-
-# 有有效水位数据的流域列表
-VALID_WATER_LEVEL_BASINS = [
-    '01017000', '01017060', '01017290', '01017960'
-]
-
-# 序列长度
-# 注意：使用3小时分辨率数据，168步 = 21天 (21天 × 8个3小时步/天)
-# 原100小时 ≈ 4.17天，现在改为21天以保证足够的时间跨度
-SEQUENCE_LENGTH = 168
-
-# 批次大小
-BATCH_SIZE = 32
-
-# 训练轮数
-EPOCHS = 50
-
-# 学习率
-LEARNING_RATE = 0.001
-# 权重衰减（L2正则化）
-WEIGHT_DECAY = 1e-5
-
-# 早停机制
-EARLY_STOPPING_PATIENCE = 5  # 验证集NSE连续多少个epoch不提升就停止训练
-
-# ==================== 时间范围配置 ====================
-# 注意：MSWEP数据时间范围为 2001-01-01 到 2024-12-31（3小时分辨率）
-# 所有训练、验证、测试时间范围必须在此范围内
-
-# 训练时间范围 (2001-2017, 约17年, 70%)
-TRAIN_START = "2001-01-01"
-TRAIN_END = "2017-12-31"
-
-# 验证时间范围 (2018-2020, 约3年, 15%)
-VALID_START = "2018-01-01"
-VALID_END = "2020-12-31"
-
-# 测试时间范围 (2021-2024, 约4年, 15%)
-TEST_START = "2021-01-01"
-TEST_END = "2024-12-31"
-
-# ==================== 特征变量配置 ====================
-# 气象强迫变量（使用StandardVariable）
-FORCING_VARIABLES = [
-    "precipitation",
-    "temperature_mean", 
-    "solar_radiation"
-    #"potential_evapotranspiration"
-]
-
-# 流域属性变量（CAMELSH数据集中确实可用的变量）
-ATTRIBUTE_VARIABLES = [
-    "area",
-    "p_mean",
-    "p_seasonality", 
-    "frac_snow",
-    "aridity",
-    #"elev_mean",
-    "slope_mean",
-    "frac_forest",
-    "dom_land_cover",
-    "soil_depth_statgso",
-    "swc_pc_syr",
-    "geol_class_1st",
-    "geol_permeability"
-    # 注意：只使用经过验证的属性变量
-    # aridity_index 不是标准变量名，已移除
-    # 如需添加更多变量，请先通过测试确认其可用性
-]
-# ATTRIBUTE_VARIABLES = ["area", "slope_mean","gauge_lat","gauge_lon","elev_mean","geol_1st_class","geol_2nd_class","geol_porostiy","geol_permeability","frac_forest","lai_max","lai_diff","dom_land_cover_frac","dom_land_cover","root_depth_50","root_depth_99","soil_depth_statsgo","soil_porosity","soil_conductivity","max_water_content","pet_mean"]
-
-# ==================== 输出配置 ====================
-# 模型保存路径
-MODEL_SAVE_PATH = "results/models"
-
-# 图片保存路径
-IMAGES_SAVE_PATH = "results/images"
-
-# 报告保存路径（markdown文件）
-REPORTS_SAVE_PATH = "results/reports"
-
-# 日志保存路径
-LOGS_SAVE_PATH = "results/logs"
-
-# ==================== 设备配置 ====================
-# 是否使用GPU（如果可用）
-USE_GPU = True
-
-# GPU设备ID（如果有多个GPU）
-GPU_DEVICE_ID = 0
-
+__all__ = [k for k in globals() if not k.startswith("_")]
