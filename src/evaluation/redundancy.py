@@ -32,7 +32,8 @@ for _p in (str(_ROOT / "src"), str(_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from pipeline.paths import COVERAGE_DIR, RESULTS_ROOT  # noqa: E402
+from evaluation.run_config import SUMMARY_DIR, load_summary, select  # noqa: E402
+from pipeline.paths import COVERAGE_DIR  # noqa: E402
 
 N_BINS = 50
 MIN_PAIRS = 500          # 成对观测少于此数的流域不计算，避免噪声结论
@@ -111,35 +112,62 @@ def build_redundancy_table(prepared=None) -> pd.DataFrame:
 
 
 def correlate_with_gain(redundancy: pd.DataFrame, metrics: pd.DataFrame,
-                        task: str = "flow", metric: str = "nse") -> dict:
-    """检验多任务增益是否与 h 的非冗余度相关。
+                        task: str = "flow", metric: str = "nse",
+                        config: str = "base", scenario: str = "complete",
+                        held_out=None) -> dict:
+    """检验多任务增益是否与 h 相对 Q 的冗余程度相关。
 
-    增益定义为逐流域 (双头 - 对应单任务) 的差值，先在模型种子上取平均。
+    增益定义为逐流域 (双头 - 对应单任务) 的差值，先在模型/掩膜种子上取平均。
     这是把"多任务没用"变成"多任务在什么条件下有用"的关键一步。
+
+    必须限定在同一可比配置内：混入 4D（不同窗口）、4F（不同流域子集）、
+    4G（不同任务权重）时，双头有这些配置的运行而单任务没有，算出来的"增益"
+    其实是配置差异——实测会把一个 ρ=-0.006、p=0.96 的零结果变成 ρ=+0.18。
+
+    ``r2_h_given_q`` 与 ``nonredundancy`` 互为 1 减，相关系数符号相反：前者是
+    "h 作为 Q 的代理有多好"，替代命题要看的是它；只报后者容易把方向讲反。
     """
     from scipy import stats as sps
 
     single = {"flow": "single_flow", "waterlevel": "single_waterlevel"}[task]
-    sub = metrics[(metrics["scenario"] == "complete") & (metrics["task"] == task)]
+    sub = select(metrics, config=config, scenario=scenario, task=task,
+                 held_out=held_out)
     dual = sub[sub["architecture"] == "dual_head"].groupby("basin")[metric].mean()
     base = sub[sub["architecture"] == single].groupby("basin")[metric].mean()
     common = dual.index.intersection(base.index)
     gain = (dual.loc[common] - base.loc[common]).rename("gain")
 
-    joined = redundancy.set_index("basin").join(gain, how="inner").dropna(
-        subset=["gain", "nonredundancy"])
-    if len(joined) < 5:
-        return {"n": len(joined)}
+    joined = redundancy.set_index("basin").join(gain, how="inner").dropna(subset=["gain"])
 
-    out = {"n": int(len(joined)), "task": task, "metric": metric}
-    for col in ("nonredundancy", "hysteresis"):
+    out = {"config": config, "scenario": scenario, "task": task, "metric": metric,
+           "held_out": held_out, "n": int(len(joined)),
+           "mean_gain": float(joined["gain"].mean()) if len(joined) else float("nan")}
+    if len(joined) < 5:
+        return out
+    for col in ("r2_h_given_q", "nonredundancy", "hysteresis"):
         vals = joined[[col, "gain"]].dropna()
         if len(vals) < 5:
             continue
         rho, p = sps.spearmanr(vals[col], vals["gain"])
-        out[f"spearman_{col}_vs_gain"] = float(rho)
-        out[f"p_{col}_vs_gain"] = float(p)
+        out[f"spearman_{col}"] = float(rho)
+        out[f"p_{col}"] = float(p)
     return out
+
+
+def gain_correlation_table(redundancy: pd.DataFrame, metrics: pd.DataFrame,
+                           config: str = "base") -> pd.DataFrame:
+    """完整标签与三档按流域留出各算一行。
+
+    留出情景只取**被留出流域**——那里的径流训练标签被整段删除，增益才是
+    "用水位替代径流"的直接度量；保留流域上的差值不回答这个问题。
+    """
+    rows = [correlate_with_gain(redundancy, metrics, task=task, config=config)
+            for task in ("flow", "waterlevel")]
+    for ratio in (30, 50, 70):
+        rows.append(correlate_with_gain(redundancy, metrics, task="flow",
+                                        config=config,
+                                        scenario=f"q_holdout{ratio}", held_out=True))
+    return pd.DataFrame([r for r in rows if r.get("n", 0) >= 5])
 
 
 def main():
@@ -150,22 +178,34 @@ def main():
     print(f"冗余度表: {path}  （{len(table)} 个流域）")
 
     ok = table.dropna(subset=["nonredundancy"])
-    print(f"\n可用流域 {len(ok)}/{len(table)}")
+    print()
+    print(f"可用流域 {len(ok)}/{len(table)}")
     print("h 相对 Q 的非冗余度（1 - R²，越大说明 h 越携带 Q 以外的信息）:")
     print(ok["nonredundancy"].describe().round(4).to_string())
-    print("\n绳套指标（涨退水段水位差 / h 标准差）:")
+    print()
+    print("绳套指标（涨退水段水位差 / h 标准差）:")
     print(ok["hysteresis"].describe().round(4).to_string())
 
-    metrics_path = RESULTS_ROOT / "summary" / "all_metrics.csv"
-    if metrics_path.exists():
-        metrics = pd.read_csv(metrics_path, dtype={"basin": str})
-        if {"dual_head", "single_flow"} <= set(metrics["architecture"]):
-            print("\n多任务增益与冗余度的相关性:")
-            for task in ("flow", "waterlevel"):
-                res = correlate_with_gain(table, metrics, task=task)
-                print(f"  {task}: {res}")
-    else:
-        print("\n尚无训练结果，跑完矩阵后重新运行本脚本即可得到相关性分析")
+    if not (SUMMARY_DIR / "all_metrics.csv").exists():
+        print()
+        print("尚无训练结果，跑完矩阵后重新运行本脚本即可得到相关性分析")
+        return
+
+    metrics, _ = load_summary()
+    corr = gain_correlation_table(table, metrics)
+    if corr.empty:
+        print()
+        print("可配对的运行不足，跳过相关性分析")
+        return
+    out = SUMMARY_DIR / "redundancy_gain_correlation.csv"
+    corr.to_csv(out, index=False, encoding="utf-8-sig")
+    print()
+    print("多任务增益与 Q–h 冗余度的相关性（同一可比配置内）:")
+    cols = [c for c in ("scenario", "task", "held_out", "n", "mean_gain",
+                        "spearman_r2_h_given_q", "p_r2_h_given_q",
+                        "spearman_hysteresis", "p_hysteresis") if c in corr]
+    print(corr[cols].round(4).to_string(index=False))
+    print(f"  已写入 {out}")
 
 
 if __name__ == "__main__":

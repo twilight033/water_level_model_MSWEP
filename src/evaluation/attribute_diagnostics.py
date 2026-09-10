@@ -25,9 +25,9 @@ for _p in (str(_ROOT / "src"), str(_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from evaluation.run_config import SUMMARY_DIR, load_summary, select  # noqa: E402
 from pipeline.paths import COVERAGE_DIR, RESULTS_ROOT, load_basin_ids  # noqa: E402
 
-SUMMARY_DIR = RESULTS_ROOT / "summary"
 
 # 诊断用的候选属性：(展示名, 文件, 列)。此处只做相关分析，不进入模型输入，
 # 因此可以包含 GAGES-II 的扰动分类等描述性变量。
@@ -76,12 +76,17 @@ def load_diagnostic_attributes(basins=None) -> pd.DataFrame:
 
 
 def correlate_with_performance(metrics: pd.DataFrame, attributes: pd.DataFrame,
-                               group: str = "4A_main", architecture: str = "dual_head",
+                               config: str = "base", architecture: str = "dual_head",
                                task: str = "flow", metric: str = "nse") -> pd.DataFrame:
+    """逐流域 NSE 与静态属性的 Spearman 相关。
+
+    按可比配置而非 group 名过滤：当前两者等价，但配置口径不会因为分组改名或
+    新增分组（4H/4I/4J 同样有完整标签的 dual_head）而失效。
+    """
     from scipy import stats as sps
 
-    sub = metrics[(metrics["group"] == group) & (metrics["architecture"] == architecture)
-                  & (metrics["task"] == task)]
+    sub = select(metrics, config=config, scenario="complete", task=task)
+    sub = sub[sub["architecture"] == architecture]
     score = sub.groupby("basin")[metric].mean()
     rows = []
     for label in attributes.columns:
@@ -96,10 +101,10 @@ def correlate_with_performance(metrics: pd.DataFrame, attributes: pd.DataFrame,
 
 
 def worst_basins(metrics: pd.DataFrame, attributes: pd.DataFrame, n: int = 10,
-                 group: str = "4A_main", architecture: str = "dual_head",
+                 config: str = "base", architecture: str = "dual_head",
                  task: str = "flow") -> pd.DataFrame:
-    sub = metrics[(metrics["group"] == group) & (metrics["architecture"] == architecture)
-                  & (metrics["task"] == task)]
+    sub = select(metrics, config=config, scenario="complete", task=task)
+    sub = sub[sub["architecture"] == architecture]
     score = sub.groupby("basin")["nse"].mean().sort_values()
     return attributes.reindex(score.index[:n]).assign(nse=score.iloc[:n]).round(3)
 
@@ -107,8 +112,7 @@ def worst_basins(metrics: pd.DataFrame, attributes: pd.DataFrame, n: int = 10,
 def main():
     SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
     COVERAGE_DIR.mkdir(parents=True, exist_ok=True)
-    metrics = pd.read_csv(SUMMARY_DIR / "all_metrics.csv", dtype={"basin": str},
-                          low_memory=False)
+    metrics, _ = load_summary()
     attrs = load_diagnostic_attributes()
     attrs.to_csv(COVERAGE_DIR / "basin_diagnostic_attributes.csv",
                  encoding="utf-8-sig")

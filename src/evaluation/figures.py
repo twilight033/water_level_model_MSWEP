@@ -199,9 +199,17 @@ def fig_gap_seasonality(month_tables: dict):
 
 # ── Major 2 / Minor 8：主实验与配对差值 ───────────────────────────────────────
 
-def fig_main_experiment(metrics: pd.DataFrame, metric="nse"):
-    """各架构的逐流域平均指标，误差棒为跨模型种子的标准差。"""
+def fig_main_experiment(metrics: pd.DataFrame, metric="nse", config="base"):
+    """各架构的逐流域平均指标，误差棒为跨模型种子的标准差。
+
+    只画同一可比配置内的运行：不同窗口长度、归一化方式、流域子集的结果混进
+    同一根柱子会得到一个谁都不对应的均值。
+    """
     sub = metrics[metrics["scenario"] == "complete"]
+    if "config" in sub.columns:
+        sub = sub[sub["config"] == config]
+    if sub.empty:
+        return None
     fig, axes = plt.subplots(1, 2, figsize=(9, 4))
     for ax, task in zip(axes, ("flow", "waterlevel")):
         rows = []
@@ -228,7 +236,8 @@ def fig_main_experiment(metrics: pd.DataFrame, metric="nse"):
         ax.set_xlim(0, max(np.array(means) + np.array(sds)) * 1.35)
         _finish(ax, title=TASK_LABEL[task], xlabel=metric.upper(), grid_axis="x")
     _suptitle(fig, "主实验：完整标签下各架构表现（误差棒为跨模型种子标准差）")
-    return _save(fig, f"fig_main_experiment_{metric}.png")
+    suffix = "" if config == "base" else f"_{config}"
+    return _save(fig, f"fig_main_experiment_{metric}{suffix}.png")
 
 
 def fig_paired_difference(per_basin: pd.DataFrame, title: str, name: str):
@@ -239,6 +248,13 @@ def fig_paired_difference(per_basin: pd.DataFrame, title: str, name: str):
 
     fig, axes = plt.subplots(1, 2, figsize=(9, 3.6),
                              gridspec_kw={"width_ratios": [3, 1]})
+    # 少数流域的单任务 NSE 极负，差值能到 +3 以上，按满量程画会把其余 80 多个
+    # 流域压成一条线。截断纵轴并注明被截掉多少个，同时给出中位数——均值受这几
+    # 个离群值影响很大，只报均值是不诚实的
+    span = float(np.percentile(np.abs(d), 98)) if d.size else 0.0
+    clipped = int((np.abs(d) > span).sum()) if span > 0 else 0
+    use_clip = span > 0 and np.abs(d).max() > 3 * span
+
     ax = axes[0]
     colors = np.where(d[order] >= 0, SERIES["orange"], SERIES["blue"])
     ax.bar(np.arange(d.size), d[order], width=0.9, color=colors, linewidth=0)
@@ -246,12 +262,24 @@ def fig_paired_difference(per_basin: pd.DataFrame, title: str, name: str):
     ax.axhline(d.mean(), color=INK_SOFT, linewidth=1.0, linestyle="--")
     ax.text(d.size * 0.02, d.mean(), f"  均值 {d.mean():+.4f}",
             va="bottom", fontsize=8, color=INK_SOFT)
+    ax.axhline(np.median(d), color=INK_SOFT, linewidth=1.0, linestyle=":")
+    ax.text(d.size * 0.02, np.median(d), f"  中位数 {np.median(d):+.4f}",
+            va="top", fontsize=8, color=INK_SOFT)
+    if use_clip:
+        ax.set_ylim(-span * 1.15, span * 1.15)
+        ax.text(0.98, 0.95, f"{clipped} 个流域超出范围（最大 {d.max():+.2f}）",
+                transform=ax.transAxes, ha="right", va="top", fontsize=8,
+                color=INK_SOFT)
     _finish(ax, title=title, xlabel="流域（按差值排序）", ylabel="NSE 差值")
 
     ax2 = axes[1]
-    ax2.hist(d, bins=20, color=SERIES["aqua"], edgecolor="white", linewidth=0.6,
+    bins = np.linspace(-span * 1.15, span * 1.15, 21) if use_clip else 20
+    ax2.hist(np.clip(d, -span * 1.15, span * 1.15) if use_clip else d, bins=bins,
+             color=SERIES["aqua"], edgecolor="white", linewidth=0.6,
              orientation="horizontal")
     ax2.axhline(0, color=INK, linewidth=0.9)
+    if use_clip:
+        ax2.set_ylim(-span * 1.15, span * 1.15)
     n_up = int((d > 0).sum())
     ax2.text(0.95, 0.02, f"改善 {n_up} / 变差 {d.size - n_up}",
              transform=ax2.transAxes, ha="right", fontsize=8, color=INK_SOFT)
@@ -291,28 +319,173 @@ def fig_missing_degradation(deg: pd.DataFrame, task="flow"):
 
 # ── Major 8：水文过程线 ───────────────────────────────────────────────────────
 
-def fig_hydrograph(series: pd.DataFrame, basin: str, task="flow",
-                   window=None, name=None):
-    """代表性流域的观测与预测过程线，可选放大某次洪峰事件。"""
+def peak_window(series: pd.DataFrame, task="flow", days=30) -> tuple:
+    """取观测最大值前后各 days/2 天，作为洪峰事件的放大窗口。"""
     frame = series.copy()
     frame["time"] = pd.to_datetime(frame["time"])
-    obs_col, pred_col = f"obs_{task}", f"pred_{task}"
-    if obs_col not in frame:
+    obs = frame[f"obs_{task}"]
+    if obs.notna().sum() == 0:
         return None
-    if window:
-        mask = (frame["time"] >= pd.Timestamp(window[0])) & (frame["time"] <= pd.Timestamp(window[1]))
-        frame = frame[mask]
+    center = frame.loc[obs.idxmax(), "time"]
+    half = pd.Timedelta(days=days / 2)
+    return (center - half, center + half)
+
+
+def fig_hydrograph(series, basin: str, task="flow", window=None, name=None,
+                   title=None):
+    """代表性流域的观测与预测过程线，可选放大某次洪峰事件（Major 8）。
+
+    series 既可以是单个 DataFrame，也可以是 {架构名: DataFrame}。传字典时
+    多个架构画在同一张图上——审稿意见要的是"看得出差别在哪一段"，只画一条
+    预测线无法回答这个问题。
+    """
+    frames = series if isinstance(series, dict) else {None: series}
+    obs_col, pred_col = f"obs_{task}", f"pred_{task}"
+
+    prepared = {}
+    for label, raw in frames.items():
+        # 单任务模型只导出自己那一路的时序，画另一个任务时直接跳过该条曲线，
+        # 不能让它把整张图否掉
+        if obs_col not in raw or pred_col not in raw:
+            continue
+        frame = raw.copy()
+        frame["time"] = pd.to_datetime(frame["time"])
+        if window:
+            mask = ((frame["time"] >= pd.Timestamp(window[0]))
+                    & (frame["time"] <= pd.Timestamp(window[1])))
+            frame = frame[mask]
+        if not frame.empty:
+            prepared[label] = frame
+    if not prepared:
+        return None
 
     fig, ax = plt.subplots(figsize=(9, 3.4))
-    ax.plot(frame["time"], frame[obs_col], color=INK, linewidth=1.4, label="观测")
-    ax.plot(frame["time"], frame[pred_col], color=SERIES["orange"], linewidth=1.4,
-            label="预测")
-    ax.legend(loc="upper right", ncol=2)
+    first = next(iter(prepared.values()))
+    ax.plot(first["time"], first[obs_col], color=INK, linewidth=1.6, label="观测")
+    for label, frame in prepared.items():
+        ax.plot(frame["time"], frame[pred_col], linewidth=1.3,
+                color=ARCH_COLOR.get(label, SERIES["orange"]),
+                label=ARCH_LABEL.get(label, "预测"))
+    ax.legend(loc="upper right", ncol=len(prepared) + 1, frameon=False)
     unit = "m³/s" if task == "flow" else "m"
-    _finish(ax, title=f"流域 {basin} — {TASK_LABEL[task]}",
+    _finish(ax, title=title or f"流域 {basin} — {TASK_LABEL[task]}",
             xlabel="时间", ylabel=f"{TASK_LABEL[task]}（{unit}）")
     fig.autofmt_xdate()
     return _save(fig, name or f"fig_hydrograph_{basin}_{task}.png")
+
+
+RUNS_DIR = RESULTS_ROOT / "runs"
+
+
+def _runs_with_timeseries() -> dict:
+    """已导出测试期时序的运行：{架构: run_key}，只取完整标签的主实验运行。"""
+    found = {}
+    for series_dir in sorted(RUNS_DIR.glob("*/timeseries")):
+        key = series_dir.parent.name
+        if "_complete_" not in key:
+            continue
+        for arch in ("single_waterlevel", "single_flow", "capacity_matched",
+                     "dual_head", "wl2d"):
+            if f"_{arch}_" in key:
+                found.setdefault(arch, key)
+                break
+    return found
+
+
+def _load_series(run_key: str, basin: str):
+    path = RUNS_DIR / run_key / "timeseries" / f"{basin}.csv"
+    return pd.read_csv(path) if path.exists() else None
+
+
+def _pick_basins(metrics: pd.DataFrame, run_key: str, task="flow", n=3) -> list:
+    """按该运行的 NSE 分位挑代表流域：好、中、差各一个，避免只展示成功案例。"""
+    sub = metrics[(metrics["run_key"] == run_key) & (metrics["task"] == task)]
+    sub = sub[np.isfinite(sub["nse"])].sort_values("nse")
+    if sub.empty:
+        return []
+    available = {p.stem for p in (RUNS_DIR / run_key / "timeseries").glob("*.csv")}
+    sub = sub[sub["basin"].isin(available)]
+    if sub.empty:
+        return []
+    idx = np.linspace(0.1, 0.9, n)
+    return [sub.iloc[int(round(q * (len(sub) - 1)))]["basin"] for q in idx]
+
+
+def figures_from_results():
+    """依赖训练结果的图：主实验、缺失下降、配对差值、过程线。"""
+    from evaluation.report import load_summary
+    from evaluation.stats import degradation, paired_differences
+
+    if not (SUMMARY_DIR / "all_metrics.csv").exists():
+        print("尚无汇总结果，训练相关的图稍后生成")
+        return
+    metrics, _ = load_summary()
+    base = metrics[metrics["config"] == "base"]
+    if base.empty:
+        print("基线配置暂无结果，跳过依赖训练结果的图")
+        return
+
+    if base["model_seed"].nunique() >= 2:
+        print("生成主实验图:")
+        fig_main_experiment(base)
+    else:
+        print("主实验图待矩阵跑完（当前种子数不足）")
+
+    # Major 3：缺失下降曲线。基线是同一架构自己的完整标签结果
+    print("生成缺失下降图:")
+    deg = degradation(base, baseline_scenario="complete", metric="nse")
+    for task in ("flow", "waterlevel"):
+        if fig_missing_degradation(deg, task=task) is None:
+            print(f"  {TASK_LABEL[task]}：缺失情景不足，跳过")
+
+    # Minor 8：逐流域配对差值。第一张是完整标签下的多任务增益（效应量很小，
+    # 必须让读者看到分布而不是只看均值）；后面几张是论文主命题——某些流域的
+    # 径流标签被整段删除后，水位监督能不能顶上
+    print("生成配对差值图:")
+    pairs = [("complete", "dual_head", "single_flow", None,
+              "完整标签：双头多任务 − 单任务 Q", "fig_paired_complete_flow.png")]
+    for ratio in (30, 50, 70):
+        pairs.append((f"q_holdout{ratio}", "dual_head", "single_flow", True,
+                      f"留出 {ratio}% 流域：被留出流域上的双头 − 单任务 Q",
+                      f"fig_paired_holdout{ratio}_flow.png"))
+    for scenario, arch_a, arch_b, held, title, name in pairs:
+        sub = base[base["scenario"] == scenario]
+        if held is not None and "held_out" in sub.columns:
+            sub = sub[sub["held_out"] == held]
+        a = sub[sub["architecture"] == arch_a]
+        b = sub[sub["architecture"] == arch_b]
+        if a.empty or b.empty:
+            print(f"  {scenario}：缺少 {arch_a} 或 {arch_b}，跳过")
+            continue
+        diff = paired_differences(a, b, "flow", "nse")
+        if len(diff) < 3:
+            print(f"  {scenario}：可配对流域不足，跳过")
+            continue
+        fig_paired_difference(diff, title, name)
+
+    # Major 8：代表性流域过程线，同一流域上把两个架构画在一起
+    runs = _runs_with_timeseries()
+    if not runs:
+        print("无已导出的测试期时序，跳过过程线图")
+        return
+    print("生成过程线图:")
+    ref = runs.get("dual_head") or next(iter(runs.values()))
+    for basin in _pick_basins(base, ref, task="flow"):
+        frames = {arch: s for arch, key in runs.items()
+                  if (s := _load_series(key, basin)) is not None}
+        if not frames:
+            continue
+        nse = base[(base["run_key"] == ref) & (base["basin"] == basin)
+                   & (base["task"] == "flow")]["nse"]
+        tag = f"（NSE {nse.iloc[0]:.3f}）" if len(nse) else ""
+        fig_hydrograph(frames, basin, task="flow",
+                       title=f"流域 {basin} — {TASK_LABEL['flow']} 测试期{tag}",
+                       name=f"fig_hydrograph_{basin}_flow.png")
+        window = peak_window(next(iter(frames.values())), task="flow", days=30)
+        if window:
+            fig_hydrograph(frames, basin, task="flow", window=window,
+                           title=f"流域 {basin} — 最大洪峰事件放大",
+                           name=f"fig_hydrograph_{basin}_flow_peak.png")
 
 
 def main():
@@ -333,16 +506,7 @@ def main():
             tables[label][task] = st["per_task"][task]["start_month_hist"]
     fig_gap_seasonality(tables)
 
-    metrics_path = SUMMARY_DIR / "all_metrics.csv"
-    if metrics_path.exists():
-        metrics = pd.read_csv(metrics_path, dtype={"basin": str})
-        if metrics["model_seed"].nunique() >= 2:
-            print("生成主实验图:")
-            fig_main_experiment(metrics)
-        else:
-            print("主实验图待矩阵跑完（当前种子数不足）")
-    else:
-        print("尚无汇总结果，训练相关的图稍后生成")
+    figures_from_results()
 
 
 if __name__ == "__main__":

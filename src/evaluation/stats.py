@@ -27,8 +27,12 @@ BOOTSTRAP_N = 10000
 def paired_differences(df_a: pd.DataFrame, df_b: pd.DataFrame, task: str,
                        metric: str = "nse") -> pd.DataFrame:
     """按流域对齐两组结果，返回逐流域差值 (a - b)。"""
-    a = df_a[df_a["task"] == task].set_index("basin")[metric]
-    b = df_b[df_b["task"] == task].set_index("basin")[metric]
+    # 用 groupby 而非 set_index：同一流域若有多行（多种子、或不慎混入多个配置），
+    # set_index 会产生重复索引，.loc[common] 随之膨胀，构造 DataFrame 时抛
+    # "All arrays must be of the same length"——该异常此前被上层 except 吞掉，
+    # 导致"双头 vs 单任务"这组关键对比被静默丢弃。
+    a = df_a[df_a["task"] == task].groupby("basin")[metric].mean()
+    b = df_b[df_b["task"] == task].groupby("basin")[metric].mean()
     common = a.index.intersection(b.index)
     out = pd.DataFrame({"basin": common, f"{metric}_a": a.loc[common].to_numpy(),
                         f"{metric}_b": b.loc[common].to_numpy()})

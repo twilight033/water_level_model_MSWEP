@@ -30,10 +30,10 @@ for _p in (str(_ROOT / "src"), str(_ROOT)):
         sys.path.insert(0, _p)
 
 from evaluation.rating_baseline import apply_rating, fit_rating, nse  # noqa: E402
+from evaluation.run_config import SUMMARY_DIR, load_summary, select  # noqa: E402
 from pipeline.paths import RESULTS_ROOT  # noqa: E402
 
 RUNS_DIR = RESULTS_ROOT / "runs"
-SUMMARY_DIR = RESULTS_ROOT / "summary"
 WL_RUN_PREFIX = "4A_main_complete_single_waterlevel_ms"
 
 
@@ -132,16 +132,19 @@ def two_stage_scores(prepared, ratio: float = 0.70, mask_seeds=(42, 123, 456),
                          for b, v in collected.items()])
 
 
-def compare_with_models(two_stage: pd.DataFrame, ratio: float) -> pd.DataFrame:
-    """与双头、单任务 Q 在同一批被留出流域上做逐流域配对检验。"""
+def compare_with_models(two_stage: pd.DataFrame, ratio: float,
+                        config: str = "base") -> pd.DataFrame:
+    """与双头、单任务 Q 在同一批被留出流域上做逐流域配对检验。
+
+    必须限定可比配置：4H_physical 与 4J_best 也包含 q_holdout30/50/70，只按
+    scenario 过滤会把三种配置的 dual_head 一起对上率定曲线基线，逐流域配对
+    立刻出现重复索引。
+    """
     from scipy import stats as sps
 
-    metrics = pd.read_csv(SUMMARY_DIR / "all_metrics.csv", dtype={"basin": str},
-                          low_memory=False)
-    metrics["held_out"] = metrics["held_out"].astype(str).str.lower().isin(("true", "1"))
+    metrics, _ = load_summary()
     scenario = f"q_holdout{int(ratio * 100)}"
-    sub = metrics[(metrics["scenario"] == scenario) & (metrics["task"] == "flow")
-                  & metrics["held_out"]]
+    sub = select(metrics, config=config, scenario=scenario, task="flow", held_out=True)
 
     ts = two_stage.set_index("basin")["nse"]
     rows = []
@@ -154,7 +157,7 @@ def compare_with_models(two_stage: pd.DataFrame, ratio: float) -> pd.DataFrame:
         nz = diff[diff != 0]
         p = float(sps.wilcoxon(nz).pvalue) if len(nz) >= 3 else float("nan")
         rows.append({
-            "scenario": scenario, "model": arch, "n_basins": len(idx),
+            "config": config, "scenario": scenario, "model": arch, "n_basins": len(idx),
             "two_stage_nse": float(ts.loc[idx].mean()),
             "model_nse": float(model.loc[idx].mean()),
             "diff_model_minus_two_stage": float(diff.mean()),
