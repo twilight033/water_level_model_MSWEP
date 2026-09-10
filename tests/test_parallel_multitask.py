@@ -20,6 +20,30 @@ from parallel_multitask import ParallelMultiTaskLSTM, build_multitask_model, mod
 import train_multitask
 
 
+def _legacy_modules_importable() -> bool:
+    """历史留档脚本能否导入。
+
+    它们在模块顶层就 `from hydrodataset.camelsh import Camelsh`，而
+    hydrodataset 在 pyproject.toml 里是**可选依赖**（hydro 组，且指向本地路径）。
+    新管线用 parquet 缓存后完全不需要它，部署到其他机器时通常不装，于是这些
+    用例会整片 ERROR、掩盖真正的故障。这里探测一次，缺依赖时跳过而非报错。
+
+    捕获 ImportError 而非 ModuleNotFoundError：若将来缺的是 HydroErr 或
+    improved_camelsh_reader 的某个依赖，同样能被正确跳过。
+    """
+    try:
+        importlib.import_module(train_multitask.EXPERIMENT_MODULES["main"])
+        return True
+    except ImportError:
+        return False
+
+
+_requires_legacy = unittest.skipUnless(
+    _legacy_modules_importable(),
+    "历史留档脚本依赖可选的 hydrodataset；新管线不需要它，故跳过",
+)
+
+
 class ParallelModelTests(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(12)
@@ -78,6 +102,7 @@ class ParallelModelTests(unittest.TestCase):
 
 
 class TrainingIntegrationTests(unittest.TestCase):
+    @_requires_legacy
     def test_single_baseline_does_not_report_zero_uncertainty(self):
         result = dict(experiment_name="baseline_both_complete_seed42",
                       test_nse_flow=0.6, test_nse_waterlevel=0.7,
@@ -90,6 +115,7 @@ class TrainingIntegrationTests(unittest.TestCase):
             self.assertTrue(math.isnan(aggregated["test_nse_flow_std"]))
             self.assertTrue(math.isnan(aggregated["test_nse_waterlevel_std"]))
 
+    @_requires_legacy
     def test_existing_training_loops_accept_parallel_model(self):
         for phase, module_name in train_multitask.EXPERIMENT_MODULES.items():
             with self.subTest(phase=phase):

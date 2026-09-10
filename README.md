@@ -49,9 +49,15 @@ uv venv; .\.venv\Scripts\activate; uv pip install -e .
 .\.venv\Scripts\python.exe -X utf8 src/pipeline/export_forcing.py
 .\.venv\Scripts\python.exe -X utf8 src/pipeline/attributes.py
 
-# 验证（30 条必须全过）
+# 验证
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
 ```
+
+**判据：无 ERROR、无 FAIL。** 未安装可选依赖 `hydrodataset` 时，
+`test_parallel_multitask.py` 中 2 个历史留档脚本的兼容性用例会显示为
+**skipped**，这是预期行为——那些脚本在模块顶层导入 hydrodataset，而新管线
+建好 parquet 缓存后完全不需要它。真正要看的是 `test_pipeline.py` 的 32 条
+（冻结划分、掩膜范围、样本集一致性、物理归一化无泄漏等）必须全过。
 
 缺失掩膜不入库，但由 `mask_seed` 确定性重建（子种子用 `zlib.crc32`，跨进程与
 跨机器一致），首次用到时自动生成并缓存。
