@@ -47,7 +47,7 @@ uv venv; .\.venv\Scripts\activate; uv pip install -e .
 # 那会覆盖仓库里已冻结的划分与统计量。
 .\.venv\Scripts\python.exe -X utf8 src/pipeline/export_targets.py
 .\.venv\Scripts\python.exe -X utf8 src/pipeline/export_forcing.py
-.\.venv\Scripts\python.exe -X utf8 src/pipeline/attributes.py
+.\.venv\Scripts\python.exe -X utf8 src/pipeline/attribute_sources.py
 
 # 验证
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
@@ -124,8 +124,16 @@ R²=0.953/误差 21.6%。
 .\.venv\Scripts\python.exe -X utf8 src/evaluation/report.py
 ```
 
-CAMELSH 数据路径在 `config.py` 的 `CAMELSH_DATA_PATH` 配置（当前
-`F:/data`，F 盘为可移动盘，运行前会自动校验目录结构）。
+原始数据路径在 `config.py` 的 `CAMELSH_DATA_PATH` 与 `MSWEP_CSV_PATH` 配置，
+两者都优先读同名环境变量，换机器无需修改被跟踪的文件：
+
+```powershell
+$env:CAMELSH_DATA_PATH = "<包含 CAMELSH\ 的父目录>"
+$env:MSWEP_CSV_PATH    = "<mswep_1000basins_mean_3hourly_1980_2024.csv 的路径>"
+```
+
+路径探测带 5 秒超时，指向未挂载的映射盘时会明确报错而不是静默挂死。
+**这两个路径只在重建缓存时用到**，缓存建好后训练与评估都不再读取原始数据。
 
 ## 文档
 
