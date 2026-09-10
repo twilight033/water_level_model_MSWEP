@@ -2,7 +2,8 @@
 
 产出（写入 results/summary/）：
 - main_experiment.csv       主实验：各架构跨种子的均值与标准差
-- paired_tests.csv          配对检验：Wilcoxon + bootstrap CI + 效应量
+- paired_tests.csv          配对检验：同一配置内的架构对比
+- config_comparison.csv     配置对比：各配置相对 base 的净效应（4-I 闸门看这张）
 - missing_degradation.csv   缺失实验：各模型相对自身完整标签基线的下降
 - seed_variance.csv         模型种子方差与掩膜种子方差分开汇总
 - short_test_sensitivity.csv 含/不含 4 个短测试期流域的聚合对比
@@ -21,7 +22,8 @@ for _p in (str(_ROOT / "src"), str(_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from evaluation.stats import compare_models, degradation, paired_test, seed_variance  # noqa: E402
+from evaluation.stats import (compare_models, degradation, paired_differences,  # noqa: E402
+                              paired_test, seed_variance)
 from evaluation.run_config import (SUMMARY_DIR, add_config_column,  # noqa: E402
                                    load_summary)
 from pipeline.splits import load_splits  # noqa: E402
@@ -83,6 +85,53 @@ def paired_tests_table(metrics: pd.DataFrame) -> pd.DataFrame:
                     continue
                 rows.append({"config": config, **res["summary"]})
     return pd.DataFrame(rows)
+
+
+def config_comparison_table(metrics: pd.DataFrame, reference: str = "base") -> pd.DataFrame:
+    """同一架构、同一任务、同一情景下，各配置相对基线配置的差异（逐流域配对）。
+
+    paired_tests 比的是**同一配置内的不同架构**，回答不了"换个配置有没有用"。
+    4-I 的闸门（属性扩充若使径流 NSE 提升 <0.005 则不做 4-J）、窗口长度、任务
+    权重、物理归一化的净效应，都要靠这张表判断。
+
+    只在两个配置共有的模型种子上配对：4I 只有 5 个种子而 4A 有 10 个，直接比
+    两边的均值等于把种子差异算进配置效应里。
+    """
+    rows = []
+    for (scenario, task, arch), grp in metrics.groupby(["scenario", "task",
+                                                        "architecture"]):
+        ref = grp[grp["config"] == reference]
+        if ref.empty:
+            continue
+        for config, sub in grp.groupby("config"):
+            if config == reference:
+                continue
+            seeds = sorted(set(ref["model_seed"]) & set(sub["model_seed"]))
+            if not seeds:
+                continue
+            a = sub[sub["model_seed"].isin(seeds)]
+            b = ref[ref["model_seed"].isin(seeds)]
+            diff = paired_differences(a, b, task, "nse")
+            if len(diff) < 3:
+                continue
+            test = paired_test(diff["diff"].to_numpy())
+            rows.append({
+                "scenario": scenario, "task": task, "architecture": arch,
+                "config": config, "reference": reference,
+                "n_shared_seeds": len(seeds), "n_basins": test.get("n"),
+                "nse_config": float(diff["nse_a"].mean()),
+                "nse_reference": float(diff["nse_b"].mean()),
+                "mean_diff": test.get("mean_diff"),
+                "ci_lo": test.get("mean_ci_lo"), "ci_hi": test.get("mean_ci_hi"),
+                "median_diff": test.get("median_diff"),
+                "wilcoxon_p": test.get("wilcoxon_p"),
+                "cohens_d_paired": test.get("cohens_d_paired"),
+                "n_basins_improved": test.get("n_basins_improved"),
+            })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(
+        ["task", "scenario", "config", "architecture"]).reset_index(drop=True)
 
 
 def missing_degradation_table(metrics: pd.DataFrame) -> pd.DataFrame:
@@ -223,6 +272,7 @@ def main():
     outputs = {
         "main_experiment.csv": main_experiment_table(metrics),
         "paired_tests.csv": paired_tests_table(metrics),
+        "config_comparison.csv": config_comparison_table(metrics),
         "missing_degradation.csv": missing_degradation_table(metrics),
         "holdout_substitution.csv": holdout_table(metrics),
         "short_test_sensitivity.csv": short_test_sensitivity(metrics),
