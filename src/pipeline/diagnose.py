@@ -36,6 +36,52 @@ def step(label, fn):
     return value
 
 
+def compare_cache_against_rebuild():
+    """磁盘上的属性缓存与"直读 CSV 重建"是否一致，不一致时打印具体差异。
+
+    缓存可能是早期用 hydrodataset 建的，与现在直读 CSV 的结果未必逐值相同
+    （例如分类属性的类别码编号不同会让 one-hot 列名不同）。这里如实报告，
+    因为第一轮 264 次实验用的正是磁盘上那份缓存。
+    """
+    import numpy as np
+    import pandas as pd
+
+    from pipeline.attribute_sources import build_attribute_table, cache_path
+    from pipeline.paths import load_basin_ids
+
+    path = cache_path("base")
+    if not path.exists():
+        return "基础缓存不存在，跳过比对"
+
+    cached = pd.read_parquet(path)
+    rebuilt, _ = build_attribute_table("base", load_basin_ids())
+    rebuilt = rebuilt.reindex(cached.index)
+
+    if list(cached.columns) != list(rebuilt.columns):
+        only_cached = [c for c in cached.columns if c not in rebuilt.columns]
+        only_rebuilt = [c for c in rebuilt.columns if c not in cached.columns]
+        print(f"    列不一致\n"
+              f"      缓存列 : {list(cached.columns)}\n"
+              f"      重建列 : {list(rebuilt.columns)}\n"
+              f"      仅缓存有: {only_cached}\n"
+              f"      仅重建有: {only_rebuilt}", flush=True)
+        return "列不一致（详见上方）"
+
+    diffs = []
+    for col in cached.columns:
+        a = cached[col].to_numpy(dtype=float)
+        b = rebuilt[col].to_numpy(dtype=float)
+        if not np.allclose(a, b, rtol=1e-6, atol=1e-6, equal_nan=True):
+            worst = int(np.nanargmax(np.abs(a - b)))
+            diffs.append(f"{col}(最大差 {np.nanmax(np.abs(a - b)):.4g} @ "
+                         f"{cached.index[worst]}: 缓存 {a[worst]:.6g} / 重建 {b[worst]:.6g})")
+    if diffs:
+        for line in diffs:
+            print(f"    {line}", flush=True)
+        return f"{len(diffs)}/{len(cached.columns)} 列取值不一致"
+    return "完全一致"
+
+
 def main():
     print(f"项目根目录: {_ROOT}", flush=True)
 
@@ -71,8 +117,10 @@ def main():
     step("9 get_attribute_table('extended')",
          lambda: get_attribute_table("extended")[0].shape)
 
+    step("10 缓存与直读结果比对", compare_cache_against_rebuild)
+
     from pipeline.dataset import PreparedData
-    step("10 PreparedData(attr_set='base')",
+    step("11 PreparedData(attr_set='base')",
          lambda: (PreparedData().input_size,))
 
     print("\n若以上全部完成，说明数据侧正常，问题在别处；"

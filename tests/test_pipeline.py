@@ -261,17 +261,51 @@ _requires_attribute_data = unittest.skipUnless(
 class AttributeSourceTests(unittest.TestCase):
     """直读 CSV 必须与既有缓存完全一致，且不得引入径流导出的属性。"""
 
-    def test_base_set_reproduces_existing_cache(self):
-        import pandas as pd
-        from pipeline.attribute_sources import get_attribute_table
-        from pipeline.paths import EXPORT_DIR
+    def test_base_set_matches_hydrodataset(self):
+        """直读 CSV 必须复现 hydrodataset 给出的同一批数值。
 
-        cached = pd.read_parquet(EXPORT_DIR / "attributes_86.parquet")
-        rebuilt, _ = get_attribute_table("base")
-        rebuilt = rebuilt.reindex(cached.index)
-        self.assertEqual(list(cached.columns), list(rebuilt.columns))
-        np.testing.assert_allclose(cached.to_numpy(float), rebuilt.to_numpy(float),
-                                   rtol=1e-6, atol=1e-6)
+        这是真正的代码不变量。此前这条测试比对的是磁盘上的
+        attributes_86.parquet，而那份缓存的来历不受控（可能是早期用
+        hydrodataset 建的，也可能是新代码重建的），本机重建过缓存后该比对退化为
+        "文件与自己比"，形同虚设；换台机器又会因缓存来历不同而失败。改为直接对
+        照 hydrodataset 的输出，缺该可选依赖时跳过；缓存与重建是否一致属于环境
+        状态，交由 src/pipeline/diagnose.py 报告。
+        """
+        try:
+            sys.path.insert(0, str(ROOT / "src" / "others"))
+            from improved_camelsh_reader import ImprovedCAMELSHReader
+            from config import ATTRIBUTE_VARIABLES, CAMELSH_DATA_PATH
+            from pipeline.paths import verify_camelsh_path
+        except ImportError:
+            self.skipTest("hydrodataset 不可用，跳过与其输出的对照")
+
+        from pipeline.attribute_sources import build_attribute_table
+        from pipeline.paths import load_basin_ids
+
+        basins = load_basin_ids()
+        reader = ImprovedCAMELSHReader(str(verify_camelsh_path(CAMELSH_DATA_PATH)),
+                                       download=False)
+        legacy = reader.read_attr_xrdataset(gage_id_lst=basins,
+                                            var_lst=ATTRIBUTE_VARIABLES).to_pandas()
+        legacy.index = [str(i) for i in legacy.index]
+        legacy = legacy.reindex(basins)
+        rebuilt, _ = build_attribute_table("base", basins)
+
+        categorical = ("dom_land_cover", "geol_class_1st")
+        for col in legacy.columns:
+            if col in categorical:
+                onehot = [c for c in rebuilt.columns if c.startswith(f"{col}__")]
+                codes = np.array([int(c.split("__")[1]) for c in onehot])
+                got = codes[rebuilt[onehot].to_numpy().argmax(axis=1)]
+                np.testing.assert_array_equal(
+                    legacy[col].to_numpy(dtype=int), got,
+                    err_msg=f"分类属性 {col} 的类别码与 hydrodataset 不一致")
+            else:
+                np.testing.assert_allclose(
+                    legacy[col].to_numpy(dtype=float),
+                    rebuilt[col].to_numpy(dtype=float),
+                    rtol=1e-6, atol=1e-6,
+                    err_msg=f"连续属性 {col} 与 hydrodataset 不一致")
 
     def test_extended_is_strict_superset_of_base(self):
         from pipeline.attribute_sources import get_attribute_table
