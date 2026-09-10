@@ -55,6 +55,10 @@ class TrainConfig:
     lr_min_factor: float = 0.02      # cosine 末端学习率相对初值的比例
     proj_size: int = 16
     loss_norm: str = "per_valid"      # per_batch 为 4-E 归一化对照
+    # 目标归一化：observed 用实测均值方差；physical 的径流尺度改由「面积×降水」
+    # 推出，回归只在仍有径流标签的流域上拟合，使留出流域零径流观测
+    target_scaling: str = "observed"  # observed | physical
+    attr_set: str = "base"            # base | extended
     task_weights: dict = field(default_factory=lambda: {"flow": 1.0, "waterlevel": 1.0})
     model_seed: int = 1
     device: str = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -62,6 +66,26 @@ class TrainConfig:
     def __post_init__(self):
         if self.loss_norm not in LOSS_NORMS:
             raise ValueError(f"loss_norm 必须是 {LOSS_NORMS} 之一，收到 {self.loss_norm!r}")
+
+
+def gauged_basins(prepared, hidden: dict = None, task: str = "flow") -> list:
+    """该情景下**仍有**该任务训练标签的流域。
+
+    物理尺度回归只能用这些流域拟合——留出流域一个观测都不能参与，否则又把
+    径流信息漏回去了。
+    """
+    out = []
+    for basin in prepared.splits["splits"]:
+        bi = prepared.basin_index[basin]
+        lo, hi = prepared.split_range(basin, "train")
+        if hi < lo:
+            continue
+        valid = ~np.isnan(prepared.targets_raw[task][bi, lo:hi + 1])
+        if hidden and task in hidden:
+            valid = valid & ~hidden[task][bi, lo:hi + 1]
+        if valid.any():
+            out.append(basin)
+    return out
 
 
 def set_seed(seed: int) -> None:
@@ -194,12 +218,18 @@ def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
                         proj_size=cfg.proj_size).to(cfg.device)
     tasks = model.tasks
 
+    # 目标尺度：physical 模式下只用仍有径流标签的流域拟合，留出流域零径流观测
+    scaling = prepared.make_scaling(
+        cfg.target_scaling,
+        fit_basins=gauged_basins(prepared, hidden) if cfg.target_scaling == "physical" else None,
+    )
+
     ds_train = WindowDataset(prepared, "train", cfg.seq_length, cfg.window_step_train,
-                             tasks=tasks, basins=basins, hidden=hidden)
+                             tasks=tasks, basins=basins, hidden=hidden, scaling=scaling)
     ds_valid = WindowDataset(prepared, "valid", cfg.seq_length, cfg.window_step_eval,
-                             tasks=tasks, basins=basins)
+                             tasks=tasks, basins=basins, scaling=scaling)
     ds_test = WindowDataset(prepared, "test", cfg.seq_length, cfg.window_step_test,
-                            tasks=tasks, basins=basins)
+                            tasks=tasks, basins=basins, scaling=scaling)
 
     generator = torch.Generator().manual_seed(cfg.model_seed)
     tr_loader = make_loader(ds_train, cfg.batch_size, shuffle=True, generator=generator)
@@ -279,5 +309,7 @@ def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
         "valid_label_counts": ds_valid.label_counts(),
         "test_label_counts": ds_test.label_counts(),
         "test_prediction": test,
+        "scaling": scaling,
+        "scaling_info": {"mode": scaling.scaling, **scaling.info},
         "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
     }

@@ -39,7 +39,9 @@ SCENARIOS = {
     "q30_seg":          ({"flow": 0.30},                  "segment", True,  ("single_flow", "dual_head")),
     "q50_seg":          ({"flow": 0.50},                  "segment", True,  ("single_flow", "dual_head")),
     "q70_seg":          ({"flow": 0.70},                  "segment", True,  ("single_flow", "dual_head")),
+    "h30_seg":          ({"waterlevel": 0.30},            "segment", True,  ("single_waterlevel", "dual_head")),
     "h50_seg":          ({"waterlevel": 0.50},            "segment", True,  ("single_waterlevel", "dual_head")),
+    "h70_seg":          ({"waterlevel": 0.70},            "segment", True,  ("single_waterlevel", "dual_head")),
     "both50_seg":       ({"flow": 0.50, "waterlevel": 0.50}, "segment", True,
                          ("single_flow", "single_waterlevel", "dual_head")),
     "q50_mcar":         ({"flow": 0.50},                  "mcar",    True,  ("single_flow", "dual_head")),
@@ -89,8 +91,8 @@ def build_matrix(scale: str = "full") -> list:
         # 按流域留出是论文主命题，用满 3 个掩膜种子（决定哪些流域被留出）；
         # 机制对照与季节性对照用较少的掩膜种子
         mask_seeds = miss_mask_seeds if scenario in (
-            "q30_seg", "q50_seg", "q70_seg", "h50_seg", "both50_seg",
-            "q_holdout30", "q_holdout50", "q_holdout70") else miss_mask_seeds[:2]
+            "q30_seg", "q50_seg", "q70_seg", "h30_seg", "h50_seg", "h70_seg",
+            "both50_seg", "q_holdout30", "q_holdout50", "q_holdout70") else miss_mask_seeds[:2]
         for arch in models:
             for ms in miss_model_seeds:
                 for xs in mask_seeds:
@@ -119,6 +121,38 @@ def build_matrix(scale: str = "full") -> list:
         for seed in miss_model_seeds:
             add("4G_taskweight", "dual_head", "complete", seed, waterlevel_weight=w_h)
 
+    # 4-H 物理归一化：把"已知流量量级"这个前提也拿掉。
+    # 默认的逐流域归一化用实测 Q 的均值方差，因此留出流域仍间接知道自己的流量
+    # 量级与变幅——真正无资料流域拿不到这两个数。physical 模式下径流尺度改由
+    # 「面积×降水」的 log–log 回归推出，回归只在仍有径流标签的流域上拟合。
+    # 这是把主张从"已知量级"升级到"完全无资料"的关键对照。
+    for arch in ("single_flow", "single_waterlevel", "dual_head"):
+        for seed in main_seeds[:5]:
+            add("4H_physical", arch, "complete", seed, target_scaling="physical")
+    for scenario in ("q_holdout30", "q_holdout50", "q_holdout70"):
+        for arch in ("single_flow", "dual_head"):
+            for ms in miss_model_seeds:
+                for xs in miss_mask_seeds:
+                    add("4H_physical", arch, scenario, ms, mask_seed=xs,
+                        target_scaling="physical")
+
+    # 4-I 属性隔离：只换属性集，窗口与归一化不变，用于测出属性扩充的净效应。
+    # 闸门——若径流 NSE 提升 <0.005 则不进行 4-J。
+    for arch in ("single_flow", "single_waterlevel", "dual_head"):
+        for seed in main_seeds[:5]:
+            add("4I_attrs", arch, "complete", seed, attr_set="extended")
+
+    # 4-J 最优配置：扩展属性 + 60 天窗口，重验主命题。
+    for arch in ("single_flow", "single_waterlevel", "dual_head"):
+        for seed in main_seeds:
+            add("4J_best", arch, "complete", seed, attr_set="extended", seq_length=480)
+    for scenario in ("q_holdout30", "q_holdout50", "q_holdout70"):
+        for arch in ("single_flow", "dual_head"):
+            for ms in miss_model_seeds:
+                for xs in miss_mask_seeds:
+                    add("4J_best", arch, scenario, ms, mask_seed=xs,
+                        attr_set="extended", seq_length=480)
+
     return entries
 
 
@@ -135,6 +169,10 @@ def run_key(entry: dict) -> str:
         parts.append("strict")
     if entry.get("waterlevel_weight") is not None:
         parts.append(f"wh{entry['waterlevel_weight']:g}")
+    if entry.get("target_scaling") and entry["target_scaling"] != "observed":
+        parts.append(entry["target_scaling"])
+    if entry.get("attr_set") and entry["attr_set"] != "base":
+        parts.append(entry["attr_set"])
     return "_".join(parts)
 
 
@@ -172,11 +210,16 @@ def run_one(prepared, entry: dict, force: bool = False, verbose: bool = False) -
     if entry.get("waterlevel_weight") is not None:
         cfg_kwargs["task_weights"] = {"flow": 1.0,
                                       "waterlevel": entry["waterlevel_weight"]}
+    # 注意不要用 key 作循环变量：函数开头的 key 是 run_key，会被覆盖
+    for field in ("target_scaling", "attr_set"):
+        if entry.get(field):
+            cfg_kwargs[field] = entry[field]
     cfg = TrainConfig(**cfg_kwargs)
 
     t0 = time.time()
     result = train_model(prepared, cfg, hidden=hidden, basins=basins, verbose=verbose)
-    metrics_df, series = evaluate_run(prepared, result["test_prediction"], result["tasks"])
+    metrics_df, series = evaluate_run(prepared, result["test_prediction"], result["tasks"],
+                                      scaling=result.get("scaling"))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics_df.insert(0, "run_key", key)
@@ -222,6 +265,7 @@ def run_one(prepared, entry: dict, force: bool = False, verbose: bool = False) -
         "n_updates_per_epoch": result["history"][0]["n_updates"] if result["history"] else 0,
         "total_updates": sum(h["n_updates"] for h in result["history"]),
         "mask_stats": (mask_stats["per_task"] if mask_stats else None),
+        "scaling_info": result.get("scaling_info"),
         "elapsed_sec": time.time() - t0,
         "history": result["history"],
     }
@@ -278,11 +322,19 @@ def main(argv=None):
             entries = entries[:args.limit]
 
         print(f"实验矩阵共 {len(entries)} 条")
-        prepared = PreparedData()
+        # 不同 attr_set 需要各自的 PreparedData（属性矩阵维度不同），按需构造并缓存
+        prepared_cache = {}
+
+        def get_prepared(attr_set):
+            if attr_set not in prepared_cache:
+                prepared_cache[attr_set] = PreparedData(attr_set=attr_set)
+            return prepared_cache[attr_set]
+
         t_start = time.time()
         done = 0
         for i, entry in enumerate(entries, 1):
-            info = run_one(prepared, entry, force=args.force, verbose=args.verbose)
+            info = run_one(get_prepared(entry.get("attr_set", "base")), entry,
+                           force=args.force, verbose=args.verbose)
             if info["status"] == "skipped":
                 print(f"[{i}/{len(entries)}] 跳过（已完成） {info['run_key']}")
                 continue

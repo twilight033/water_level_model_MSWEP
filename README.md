@@ -26,7 +26,11 @@ results/summary/           跨运行汇总与面向论文的表格
 | `src/models/lstm_models.py` | 单任务 / 双头 / 参数量匹配对照 / WL2D 及其变体 |
 | `src/training/trainer.py` | 统一训练与评估循环，如实记录训练预算 |
 | `src/training/run_matrix.py` | 实验矩阵编排，支持断点续跑 |
+| `src/pipeline/attribute_sources.py` | 直读原始属性 CSV，不经 hydrodataset；base / extended 两套属性集 |
 | `src/evaluation/` | 多指标、事件指标、配对检验与论文表格 |
+| `src/evaluation/rating_baseline.py` | 率定关系稳定性、区域化率定曲线基线 |
+| `src/evaluation/two_stage_baseline.py` | 两阶段基线：气象→预测水位→率定→径流 |
+| `src/evaluation/attribute_diagnostics.py` | 逐流域性能与属性的关联诊断 |
 
 ## 换一台机器起步
 
@@ -53,6 +57,28 @@ uv venv; .\.venv\Scripts\activate; uv pip install -e .
 跨机器一致），首次用到时自动生成并缓存。
 
 `results/` 不入库，跑完手动拷回。
+
+## 目标归一化与属性集
+
+两个正交的配置维度，均由 `TrainConfig` 控制，并计入 `run_key`：
+
+| `target_scaling` | 径流尺度来源 | 能主张什么 |
+|---|---|---|
+| `observed`（默认） | 逐流域实测均值/标准差 | 缺少连续时序时水位可替代——但留出流域仍间接知道自己的流量量级 |
+| `physical` | `面积×降水` 的 log–log 回归，**只在仍有径流标签的流域上拟合** | 仅有属性与水位记录、**零流量观测**时水位监督依然有效 |
+
+`physical` 模式下**水位仍用实测统计量**——留出情景的前提就是该流域有水位记录，
+水位观测本来就是可得的。实测尺度精度：均值 R²=0.987/误差 12.5%，标准差
+R²=0.953/误差 21.6%。
+
+| `attr_set` | 列数 | 内容 |
+|---|---|---|
+| `base`（默认） | 15 | 项目既有的 12 个属性，与旧结果逐值一致 |
+| `extended` | 27 | 追加高程、蒸散、水文土壤组、地下水位埋深、人口密度、城镇化率、坝密度等 |
+
+**由实测径流导出的属性一律禁用**（`BFI_AVE`、`attributes_gageii_FlowRec.csv`
+全部 114 列）——留出情景假设该流域无径流数据，用这些列等于把径流信息漏回去。
+`attribute_sources.AttrSpec` 在构造时即拒绝。
 
 ## 训练协议（已固定）
 

@@ -60,10 +60,14 @@ def load_targets(grid: pd.DatetimeIndex, basins: list) -> dict:
     return out
 
 
-def load_attributes(basins: list) -> tuple:
-    """返回 (attr_array [n_basin, n_attr], 列名, one-hot 列名)。"""
-    from pipeline.attributes import build_attributes
+def load_attributes(basins: list, attr_set: str = "base") -> tuple:
+    """返回 (attr_array [n_basin, n_attr], 列名, one-hot 列名)。
 
-    df, onehot = build_attributes()
-    df = df.reindex(basins)
+    attr_set="base" 复现项目既有的 12 个属性；"extended" 追加地形、蒸散、土壤组、
+    地下水与人类活动共 12 个连续列（详见 pipeline.attribute_sources）。
+    """
+    from pipeline.attribute_sources import get_attribute_table
+
+    df, onehot = get_attribute_table(attr_set, basins=basins)
+    df = df.reindex([str(b) for b in basins])
     return df.to_numpy(dtype="float32"), list(df.columns), list(onehot)

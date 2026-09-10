@@ -42,10 +42,52 @@ from pipeline.splits import load_splits  # noqa: E402
 SPLIT_NAMES = ("train", "valid", "test")
 
 
+class TargetScaling:
+    """一次运行所用的目标归一化方案。
+
+    ``observed``：逐流域用实测均值与标准差。默认方案，但对"该流域没有径流观测"
+    的留出情景构成泄漏——模型仍间接知道流量量级与变幅。
+
+    ``physical``：径流尺度改由 ``面积 × 日均降水`` 的 log–log 回归推出，回归只在
+    仍有径流标签的流域上拟合，留出流域零径流观测。**水位仍用实测统计量**——这不是
+    双标准：留出情景的前提就是该流域有水位记录，水位观测本来就是可得的。
+    """
+
+    def __init__(self, prepared, scaling: str = "observed", fit_basins=None):
+        if scaling not in ("observed", "physical"):
+            raise ValueError(f"scaling 必须是 observed 或 physical，收到 {scaling!r}")
+        self.scaling = scaling
+        self.info = {}
+        basins = prepared.basins
+        self.mean, self.std, self.normalized = {}, {}, {}
+
+        for task in TASKS:
+            if task == "flow" and scaling == "physical":
+                from pipeline.normalization import physical_flow_scale
+                mean, std, info = physical_flow_scale(
+                    prepared.attrs_raw, prepared.stats[task],
+                    fit_basins if fit_basins is not None else basins, basins)
+                self.info[task] = info
+            else:
+                mean = np.array([prepared.stats[task][b]["mean"] for b in basins],
+                                dtype="float32")
+                std = np.array([prepared.stats[task][b]["std"] for b in basins],
+                               dtype="float32")
+            self.mean[task] = mean
+            self.std[task] = std
+            self.normalized[task] = (
+                (prepared.targets_raw[task] - mean[:, None]) / std[:, None]
+            ).astype("float32")
+
+    def denormalize(self, task: str, basin_idx, values):
+        return values * self.std[task][basin_idx] + self.mean[task][basin_idx]
+
+
 class PreparedData:
     """一次性载入并归一化的共享容器，train/valid/test 三个数据集共用。"""
 
-    def __init__(self, splits_payload: dict = None, norm_stats: dict = None):
+    def __init__(self, splits_payload: dict = None, norm_stats: dict = None,
+                 attr_set: str = "base"):
         self.splits = splits_payload or load_splits()
         self.stats = norm_stats or load_norm_stats()
 
@@ -62,27 +104,30 @@ class PreparedData:
         self.forcing = ((forcing - f_mean) / f_std).astype("float32")
 
         # 静态属性归一化；one-hot 列的 mean=0/std=1，等于不做变换
-        attr_arr, attr_cols, _ = load_attributes(basins)
+        self.attr_set = attr_set
+        attr_arr, attr_cols, _ = load_attributes(basins, attr_set=attr_set)
+        # 物理尺度回归需要未标准化的 area 与 p_mean，故原值一并保留
+        self.attrs_raw = pd.DataFrame(attr_arr, index=basins, columns=attr_cols)
         a_mean = np.array([self.stats["attr"][c]["mean"] for c in attr_cols], dtype="float32")
         a_std = np.array([self.stats["attr"][c]["std"] for c in attr_cols], dtype="float32")
         self.attrs = ((attr_arr - a_mean) / a_std).astype("float32")
         self.attr_columns = attr_cols
 
-        # 目标：保留原值用于评估，同时准备逐流域归一化后的值
-        raw = load_targets(grid, basins)
-        self.targets_raw = raw
-        self.target_mean = {}
-        self.target_std = {}
-        self.targets = {}
-        for task in TASKS:
-            mean = np.array([self.stats[task][b]["mean"] for b in basins], dtype="float32")
-            std = np.array([self.stats[task][b]["std"] for b in basins], dtype="float32")
-            self.target_mean[task] = mean
-            self.target_std[task] = std
-            self.targets[task] = ((raw[task] - mean[:, None]) / std[:, None]).astype("float32")
+        # 目标原值保留用于评估；默认按实测统计量归一化
+        self.targets_raw = load_targets(grid, basins)
+        self.default_scaling = TargetScaling(self, "observed")
+        self.target_mean = self.default_scaling.mean
+        self.target_std = self.default_scaling.std
+        self.targets = self.default_scaling.normalized
 
         self.n_time = len(grid)
         self.input_size = self.forcing.shape[-1] + self.attrs.shape[-1]
+
+    def make_scaling(self, scaling: str = "observed", fit_basins=None) -> TargetScaling:
+        """按需构造目标归一化方案；observed 复用已建好的默认方案。"""
+        if scaling == "observed":
+            return self.default_scaling
+        return TargetScaling(self, scaling, fit_basins)
 
     def split_range(self, basin: str, split: str) -> tuple:
         """返回该流域该分段目标时刻的整数位置闭区间 (start_pos, end_pos)。"""
@@ -93,9 +138,9 @@ class PreparedData:
         end_pos = int(self.grid.searchsorted(end, "right")) - 1
         return start_pos, end_pos
 
-    def denormalize(self, task: str, basin_idx, values):
+    def denormalize(self, task: str, basin_idx, values, scaling: "TargetScaling" = None):
         """把归一化的预测或观测还原为物理量。"""
-        return values * self.target_std[task][basin_idx] + self.target_mean[task][basin_idx]
+        return (scaling or self.default_scaling).denormalize(task, basin_idx, values)
 
 
 class WindowDataset(Dataset):
@@ -120,7 +165,8 @@ class WindowDataset(Dataset):
     """
 
     def __init__(self, prepared: PreparedData, split: str, seq_length: int,
-                 window_step: int = 1, tasks=TASKS, basins=None, hidden=None):
+                 window_step: int = 1, tasks=TASKS, basins=None, hidden=None,
+                 scaling: TargetScaling = None):
         if split not in SPLIT_NAMES:
             raise ValueError(f"split 必须是 {SPLIT_NAMES} 之一，收到 {split!r}")
         self.prepared = prepared
@@ -129,6 +175,10 @@ class WindowDataset(Dataset):
         self.window_step = int(window_step)
         self.tasks = tuple(tasks)
         self.hidden = hidden or {}
+        # 目标归一化方案随运行而变（observed / physical），样本准入只看标签是否
+        # 有效，与尺度无关，因此两种方案给出完全相同的样本集
+        self.scaling = scaling or prepared.default_scaling
+        self._targets = self.scaling.normalized
 
         pool = basins if basins is not None else list(prepared.splits["splits"].keys())
         self.basins = [b for b in pool if b in prepared.basin_index]
@@ -147,7 +197,7 @@ class WindowDataset(Dataset):
             cand = np.arange(start_pos, end_pos + 1, self.window_step, dtype=np.int64)
             keep = np.zeros(cand.shape, dtype=bool)
             for task in self.tasks:
-                valid = ~np.isnan(prepared.targets[task][bi, cand])
+                valid = ~np.isnan(self._targets[task][bi, cand])
                 if task in self.hidden:
                     valid &= ~self.hidden[task][bi, cand]
                 keep |= valid          # 并集准入；单任务时等价于该任务有效
@@ -172,7 +222,7 @@ class WindowDataset(Dataset):
         """每个任务实际参与损失的标签数，用于报告监督总量。"""
         out = {}
         for task in self.tasks:
-            valid = ~np.isnan(self.prepared.targets[task][self.basin_idx, self.target_pos])
+            valid = ~np.isnan(self._targets[task][self.basin_idx, self.target_pos])
             if task in self.hidden:
                 valid &= ~self.hidden[task][self.basin_idx, self.target_pos]
             out[task] = int(valid.sum())
@@ -195,7 +245,7 @@ class WindowDataset(Dataset):
         y = np.empty((idx.size, len(self.tasks)), dtype="float32")
         m = np.zeros((idx.size, len(self.tasks)), dtype="float32")
         for k, task in enumerate(self.tasks):
-            vals = self.prepared.targets[task][bi, pos]
+            vals = self._targets[task][bi, pos]
             valid = ~np.isnan(vals)
             if task in self.hidden:
                 valid &= ~self.hidden[task][bi, pos]

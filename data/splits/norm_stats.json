@@ -21,8 +21,21 @@
       "dom_land_cover__6",
       "geol_class_1st__0",
       "geol_class_1st__1",
-      "geol_class_1st__2"
+      "geol_class_1st__2",
+      "elev_mean",
+      "elev_std",
+      "pet_mean",
+      "soil_group_a",
+      "soil_group_d",
+      "soil_awc",
+      "water_table_depth",
+      "subsurface_contact",
+      "pop_density",
+      "urban_frac",
+      "dam_density",
+      "reservoir_storage"
     ],
+    "attr_set": "extended（超集；base 子集读同一份文件）",
     "onehot_columns": [
       "dom_land_cover__2",
       "dom_land_cover__6",
@@ -122,6 +135,66 @@
       "mean": 0.0,
       "std": 1.0,
       "onehot": true
+    },
+    "elev_mean": {
+      "mean": 224.60362569675888,
+      "std": 163.72292347474044,
+      "onehot": false
+    },
+    "elev_std": {
+      "mean": 73.47449665291364,
+      "std": 63.760186637940286,
+      "onehot": false
+    },
+    "pet_mean": {
+      "mean": 3.3627907758535343,
+      "std": 0.319868340275191,
+      "onehot": false
+    },
+    "soil_group_a": {
+      "mean": 14.450872126273637,
+      "std": 11.721099595872934,
+      "onehot": false
+    },
+    "soil_group_d": {
+      "mean": 13.121212862621517,
+      "std": 9.954963033933035,
+      "onehot": false
+    },
+    "soil_awc": {
+      "mean": 0.13984021873668182,
+      "std": 0.03810679681012914,
+      "onehot": false
+    },
+    "water_table_depth": {
+      "mean": 240.5506604660389,
+      "std": 118.18807994658316,
+      "onehot": false
+    },
+    "subsurface_contact": {
+      "mean": 117.20836684870166,
+      "std": 117.8478068981348,
+      "onehot": false
+    },
+    "pop_density": {
+      "mean": 107.10230818919318,
+      "std": 169.2219121945449,
+      "onehot": false
+    },
+    "urban_frac": {
+      "mean": 12.247152487379173,
+      "std": 13.621446315760345,
+      "onehot": false
+    },
+    "dam_density": {
+      "mean": 4.375604146311796,
+      "std": 4.860877582435478,
+      "onehot": false
+    },
+    "reservoir_storage": {
+      "mean": 42.40253439493651,
+      "std": 71.62870131724426,
+      "onehot": false
     }
   },
   "flow": {

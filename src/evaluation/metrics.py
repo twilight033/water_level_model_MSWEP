@@ -152,7 +152,8 @@ def basin_metrics(obs: np.ndarray, pred: np.ndarray,
     return out
 
 
-def build_basin_series(prepared, result: dict, task: str, basin_idx: int) -> pd.DataFrame:
+def build_basin_series(prepared, result: dict, task: str, basin_idx: int,
+                       scaling=None) -> pd.DataFrame:
     """把某流域的预测还原为按时间排序、缺失处为 NaN 的等间隔序列。"""
     sel = result["basin_idx"] == basin_idx
     pos = result["target_pos"][sel]
@@ -162,8 +163,10 @@ def build_basin_series(prepared, result: dict, task: str, basin_idx: int) -> pd.
 
     obs_n = result["obs"][task][sel][order]
     pred_n = result["pred"][task][sel][order]
-    obs = prepared.denormalize(task, basin_idx, obs_n)
-    pred = prepared.denormalize(task, basin_idx, pred_n)
+    # 用本次运行实际使用的尺度反归一化。observed 与 physical 两种模式下，
+    # 观测都能被精确还原（同一仿射变换），因此指标始终是在物理量纲上算的
+    obs = prepared.denormalize(task, basin_idx, obs_n, scaling)
+    pred = prepared.denormalize(task, basin_idx, pred_n, scaling)
 
     full = np.arange(pos.min(), pos.max() + 1)
     frame = pd.DataFrame({"target_pos": full})
@@ -176,7 +179,7 @@ def build_basin_series(prepared, result: dict, task: str, basin_idx: int) -> pd.
     return frame.merge(lut, on="target_pos", how="left")
 
 
-def evaluate_run(prepared, result: dict, tasks) -> tuple:
+def evaluate_run(prepared, result: dict, tasks, scaling=None) -> tuple:
     """对一次运行的测试集预测计算逐流域指标，并返回逐流域时序表。
 
     Returns
@@ -190,7 +193,7 @@ def evaluate_run(prepared, result: dict, tasks) -> tuple:
         basin = prepared.basins[int(basin_idx)]
         merged = None
         for task in tasks:
-            frame = build_basin_series(prepared, result, task, int(basin_idx))
+            frame = build_basin_series(prepared, result, task, int(basin_idx), scaling)
             merged = frame if merged is None else merged.merge(
                 frame.drop(columns=["time"]), on="target_pos", how="outer")
 

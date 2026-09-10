@@ -232,6 +232,114 @@ class TimeAxisTests(unittest.TestCase):
         self.assertEqual(target_time - last_input, pd.Timedelta(hours=3))
 
 
+class AttributeSourceTests(unittest.TestCase):
+    """直读 CSV 必须与既有缓存完全一致，且不得引入径流导出的属性。"""
+
+    def test_base_set_reproduces_existing_cache(self):
+        import pandas as pd
+        from pipeline.attribute_sources import get_attribute_table
+        from pipeline.paths import EXPORT_DIR
+
+        cached = pd.read_parquet(EXPORT_DIR / "attributes_86.parquet")
+        rebuilt, _ = get_attribute_table("base")
+        rebuilt = rebuilt.reindex(cached.index)
+        self.assertEqual(list(cached.columns), list(rebuilt.columns))
+        np.testing.assert_allclose(cached.to_numpy(float), rebuilt.to_numpy(float),
+                                   rtol=1e-6, atol=1e-6)
+
+    def test_extended_is_strict_superset_of_base(self):
+        from pipeline.attribute_sources import get_attribute_table
+
+        base, _ = get_attribute_table("base")
+        ext, _ = get_attribute_table("extended")
+        self.assertTrue(set(base.columns) < set(ext.columns))
+        for col in base.columns:
+            np.testing.assert_allclose(base[col].to_numpy(float),
+                                       ext[col].to_numpy(float), rtol=1e-6, atol=1e-6)
+
+    def test_no_flow_derived_attributes(self):
+        """由实测径流导出的属性绝不能进入输入——留出情景假设该流域无径流数据。"""
+        from pipeline import attribute_sources as src
+
+        for spec in src.EXTENDED_SPECS:
+            self.assertNotIn(spec.column, src.FLOW_DERIVED_COLUMNS)
+            self.assertNotIn(spec.file, src.FLOW_DERIVED_FILES)
+            self.assertNotIn(spec.column, src.CONSTANT_COLUMNS)
+        # 构造时即应拒绝
+        with self.assertRaises(ValueError):
+            src.AttrSpec("bfi", "attributes_gageii_Hydro.csv", "BFI_AVE")
+        with self.assertRaises(ValueError):
+            src.AttrSpec("x", "attributes_gageii_FlowRec.csv", "ACTIVE09")
+
+
+class PhysicalScalingTests(unittest.TestCase):
+    """物理归一化必须真正不含被留出流域的任何径流观测。"""
+
+    def _fixture(self):
+        import pandas as pd
+        attr = pd.DataFrame({"area": [10.0, 100.0, 1000.0, 5000.0],
+                             "p_mean": [2.0, 3.0, 2.5, 4.0]},
+                            index=["a", "b", "c", "d"])
+        observed = {"a": {"mean": 1.0, "std": 1.4}, "b": {"mean": 12.0, "std": 16.0},
+                    "c": {"mean": 90.0, "std": 130.0}, "d": {"mean": 700.0, "std": 950.0}}
+        return attr, observed
+
+    def test_held_out_basin_observations_do_not_affect_its_scale(self):
+        from pipeline.normalization import physical_flow_scale
+
+        attr, observed = self._fixture()
+        allb, fit = ["a", "b", "c", "d"], ["a", "b", "c"]      # d 被留出
+        mean1, std1, _ = physical_flow_scale(attr, observed, fit, allb)
+
+        tampered = {k: dict(v) for k, v in observed.items()}
+        tampered["d"] = {"mean": 1.0, "std": 1.0}              # 篡改留出流域的观测
+        mean2, std2, _ = physical_flow_scale(attr, tampered, fit, allb)
+        np.testing.assert_allclose(mean1, mean2)
+        np.testing.assert_allclose(std1, std2)
+
+    def test_rejects_unknown_or_empty_fit_basins(self):
+        from pipeline.normalization import physical_flow_scale
+
+        attr, observed = self._fixture()
+        with self.assertRaises(ValueError):
+            physical_flow_scale(attr, observed, [], ["a", "b"])
+        with self.assertRaises(ValueError):
+            physical_flow_scale(attr, observed, ["zz"], ["a", "b"])
+
+    def test_waterlevel_scale_unchanged_in_physical_mode(self):
+        """水位仍用实测统计量——留出情景的前提就是该流域有水位记录。"""
+        prep = prepared()
+        physical = prep.make_scaling("physical", fit_basins=prep.basins[:40])
+        np.testing.assert_allclose(physical.mean["waterlevel"],
+                                   prep.default_scaling.mean["waterlevel"])
+        np.testing.assert_allclose(physical.std["waterlevel"],
+                                   prep.default_scaling.std["waterlevel"])
+        # 径流尺度则必须改变
+        self.assertFalse(np.allclose(physical.mean["flow"],
+                                     prep.default_scaling.mean["flow"]))
+
+    def test_sample_set_identical_across_scalings(self):
+        """尺度只改目标数值，不改样本准入——两种模式必须给出相同的样本集。"""
+        prep = prepared()
+        basins = list(prep.splits["splits"])[:10]
+        physical = prep.make_scaling("physical", fit_basins=prep.basins)
+        a = WindowDataset(prep, "train", SEQ, 8, basins=basins)
+        b = WindowDataset(prep, "train", SEQ, 8, basins=basins, scaling=physical)
+        self.assertTrue(np.array_equal(a.basin_idx, b.basin_idx))
+        self.assertTrue(np.array_equal(a.target_pos, b.target_pos))
+
+    def test_gauged_basins_excludes_held_out(self):
+        from training.trainer import gauged_basins
+
+        prep = prepared()
+        hidden, stats = build_hidden(prep, {"flow": 0.5},
+                                     mechanism="basin_holdout", mask_seed=42)
+        held = set(stats["per_task"]["flow"]["held_out_basins"])
+        fit = set(gauged_basins(prep, hidden))
+        self.assertFalse(fit & held, "留出流域混入了物理尺度的拟合样本")
+        self.assertEqual(fit, set(prep.splits["splits"]) - held)
+
+
 class MaskedLossGradientTests(unittest.TestCase):
     """掩膜为 0 的任务不得产生梯度，且不得污染另一任务。"""
 
