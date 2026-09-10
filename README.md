@@ -53,6 +53,12 @@ uv venv; .\.venv\Scripts\activate; uv pip install -e .
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
 ```
 
+卡住或报错时，先跑逐步诊断定位（每步立即输出，最后打印的那行即卡点）：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -u src/pipeline/diagnose.py
+```
+
 **判据：无 ERROR、无 FAIL。** 未安装可选依赖 `hydrodataset` 时，
 `test_parallel_multitask.py` 中 2 个历史留档脚本的兼容性用例会显示为
 **skipped**，这是预期行为——那些脚本在模块顶层导入 hydrodataset，而新管线

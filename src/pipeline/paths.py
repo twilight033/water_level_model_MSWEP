@@ -36,6 +36,34 @@ _REQUIRED_SUBDIRS = (
 )
 
 
+def path_reachable(path, timeout_sec: float = 5.0):
+    """带超时的路径可达性探测。
+
+    返回 True/False 表示存在与否，返回 None 表示**超时**。
+
+    为什么需要它：未挂载的映射盘或断开的网络路径上，``os.stat`` 可能阻塞几十秒
+    甚至无限期，而不是立刻返回 False。直接调 ``Path.exists()`` 会让整个测试或
+    批量训练静默挂死——实测中一次 ``unittest`` 就卡在属性缓存那条用例上没有
+    任何输出。放到后台线程里探测，超时即判定为不可达并给出明确提示。
+    """
+    import threading
+
+    result = {}
+
+    def probe():
+        try:
+            result["value"] = Path(path).exists()
+        except OSError as exc:
+            result["error"] = exc
+
+    worker = threading.Thread(target=probe, daemon=True)
+    worker.start()
+    worker.join(timeout_sec)
+    if worker.is_alive():
+        return None
+    return result.get("value", False)
+
+
 def verify_camelsh_path(data_path) -> Path:
     """校验 CAMELSH 数据根目录，缺任何一个子目录都立即报错。
 
@@ -50,10 +78,20 @@ def verify_camelsh_path(data_path) -> Path:
         校验通过的绝对路径。
     """
     root = Path(data_path)
-    if not root.exists():
+    reachable = path_reachable(root)
+    if reachable is None:
+        raise FileNotFoundError(
+            f"探测 CAMELSH 数据根目录超时: {root}\n"
+            f"该路径很可能指向未挂载的映射盘或断开的网络位置。挂载后重试，"
+            f"或改用本机实际路径：\n"
+            f'    $env:CAMELSH_DATA_PATH = "<该机器上的实际路径>"'
+        )
+    if not reachable:
         raise FileNotFoundError(
             f"CAMELSH 数据根目录不存在: {root}\n"
-            f"F 盘是可移动盘，请确认已挂载，或修改 config.py 的 CAMELSH_DATA_PATH。"
+            f"若数据在可移动盘上请先确认已挂载；否则修改 config.py 的 "
+            f"CAMELSH_DATA_PATH，或设置同名环境变量：\n"
+            f'    $env:CAMELSH_DATA_PATH = "<该机器上的实际路径>"'
         )
     missing = [str(sub) for sub in _REQUIRED_SUBDIRS if not (root / sub).is_dir()]
     if missing:

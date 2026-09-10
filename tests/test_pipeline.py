@@ -232,6 +232,32 @@ class TimeAxisTests(unittest.TestCase):
         self.assertEqual(target_time - last_input, pd.Timedelta(hours=3))
 
 
+def _attribute_data_available() -> bool:
+    """扩展属性集是否可得：已有缓存，或原始数据可达可重建。
+
+    没有这层保护时，缓存缺失会让用例落进"从原始 CSV 重建"的分支；若
+    CAMELSH_DATA_PATH 指向未挂载的映射盘，os.stat 会阻塞很久，整个测试静默
+    卡死且没有任何提示——这正是部署到另一台机器时实际踩到的坑。
+    """
+    from pipeline.attribute_sources import cache_path
+    from pipeline.paths import path_reachable
+
+    if cache_path("base").exists() and cache_path("extended").exists():
+        return True
+    try:
+        from config import CAMELSH_DATA_PATH
+        return path_reachable(CAMELSH_DATA_PATH) is True
+    except Exception:                              # noqa: BLE001
+        return False
+
+
+_requires_attribute_data = unittest.skipUnless(
+    _attribute_data_available(),
+    "缺少属性缓存且原始数据不可达；请先运行 src/pipeline/attribute_sources.py",
+)
+
+
+@_requires_attribute_data
 class AttributeSourceTests(unittest.TestCase):
     """直读 CSV 必须与既有缓存完全一致，且不得引入径流导出的属性。"""
 
