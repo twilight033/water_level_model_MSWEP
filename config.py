@@ -89,7 +89,21 @@ FORCING_VARIABLES = [
     #"potential_evapotranspiration"
 ]
 
-# 流域属性变量（CAMELSH数据集中确实可用的变量）
+# ⚠ 当前管线**不读**这个列表。
+#
+# 静态属性的权威定义已移到 src/pipeline/attribute_sources.py：
+#   BASE_SPECS      12 个属性（与本列表等价，且已逐值比对确认一致）
+#   EXTENDED_SPECS  追加高程、潜在蒸散、水文土壤组、地下水位埋深、
+#                   人口密度、城镇化率、坝密度等 12 列
+# 由 TrainConfig.attr_set = "base" | "extended" 选择，不在此处配置。
+#
+# 之所以搬走：本列表装的是 hydrodataset 的**变量名**，而 hydrodataset 只暴露
+# 一张映射表内的子集，名字不在表里就报"不是标准变量名"——项目早期据此误判为
+# "部分属性不可用"，实际上 86 个流域在 28 个属性文件中均有完整记录，697 个
+# 数值属性可用。新模块直接读原始 CSV 绕开该限制，需要
+# (输出名, 源文件, 原始列, 类型) 四元组，扁平的名字列表已经装不下。
+#
+# 本列表仅保留给 src/training/ 与 src/others/ 下的历史留档脚本使用。
 ATTRIBUTE_VARIABLES = [
     "area",
     "p_mean",
