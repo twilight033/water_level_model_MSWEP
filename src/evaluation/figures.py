@@ -289,7 +289,7 @@ def fig_paired_difference(per_basin: pd.DataFrame, title: str, name: str):
 
 # ── Major 3：缺失下降曲线 ──────────────────────────────────────────────────────
 
-def fig_missing_degradation(deg: pd.DataFrame, task="flow"):
+def fig_missing_degradation(deg: pd.DataFrame, task="flow", name=None):
     """缺失比例 vs 相对自身完整标签基线的下降幅度。"""
     ratio_of = {"q30_seg": 30, "q50_seg": 50, "q70_seg": 70,
                 "h50_seg": 50, "both50_seg": 50}
@@ -314,7 +314,7 @@ def fig_missing_degradation(deg: pd.DataFrame, task="flow"):
     ax.axhline(0, color=INK, linewidth=0.9)
     _finish(ax, title=f"{TASK_LABEL[task]}：相对自身完整标签基线的 NSE 下降",
             xlabel="人工缺失比例 %", ylabel="NSE 下降（越大越差）")
-    return _save(fig, f"fig_missing_degradation_{task}.png")
+    return _save(fig, name or f"fig_missing_degradation_{task}.png")
 
 
 # ── Major 8：水文过程线 ───────────────────────────────────────────────────────
@@ -411,63 +411,79 @@ def _pick_basins(metrics: pd.DataFrame, run_key: str, task="flow", n=3) -> list:
     return [sub.iloc[int(round(q * (len(sub) - 1)))]["basin"] for q in idx]
 
 
+def _tag(config: str) -> str:
+    """文件名后缀：base 配置不加后缀，其余配置以 _<config> 区分。"""
+    return "" if config == "base" else "_" + config.replace("+", "_")
+
+
 def figures_from_results():
-    """依赖训练结果的图：主实验、缺失下降、配对差值、过程线。"""
-    from evaluation.report import load_summary
+    """依赖训练结果的图：主实验、缺失下降、配对差值、过程线。
+
+    每个可比配置各出一套（base / physical / L480+extended …），文件名以配置
+    区分；过程线只对 base 出，其他配置没有导出时序。
+    """
+    from evaluation.run_config import load_summary
     from evaluation.stats import degradation, paired_differences
 
     if not (SUMMARY_DIR / "all_metrics.csv").exists():
         print("尚无汇总结果，训练相关的图稍后生成")
         return
     metrics, _ = load_summary()
-    base = metrics[metrics["config"] == "base"]
-    if base.empty:
-        print("基线配置暂无结果，跳过依赖训练结果的图")
+
+    # 只为"有完整标签 + 有留出情景"的配置出整套图，单点消融不出
+    configs = [c for c in sorted(set(metrics["config"]))
+               if (metrics["config"] == c).sum()
+               and set(metrics[metrics["config"] == c]["scenario"]) >= {"complete", "q_holdout70"}]
+    if not configs:
+        print("没有任何配置同时含完整标签与留出情景，跳过依赖训练结果的图")
         return
 
-    if base["model_seed"].nunique() >= 2:
-        print("生成主实验图:")
-        fig_main_experiment(base)
-    else:
-        print("主实验图待矩阵跑完（当前种子数不足）")
+    for config in configs:
+        sub = metrics[metrics["config"] == config]
+        tag = _tag(config)
+        print(f"配置 {config}:")
 
-    # Major 3：缺失下降曲线。基线是同一架构自己的完整标签结果
-    print("生成缺失下降图:")
-    deg = degradation(base, baseline_scenario="complete", metric="nse")
-    for task in ("flow", "waterlevel"):
-        if fig_missing_degradation(deg, task=task) is None:
-            print(f"  {TASK_LABEL[task]}：缺失情景不足，跳过")
+        if sub[sub["scenario"] == "complete"]["model_seed"].nunique() >= 2:
+            fig_main_experiment(sub, config=config)
 
-    # Minor 8：逐流域配对差值。第一张是完整标签下的多任务增益（效应量很小，
-    # 必须让读者看到分布而不是只看均值）；后面几张是论文主命题——某些流域的
-    # 径流标签被整段删除后，水位监督能不能顶上
-    print("生成配对差值图:")
-    pairs = [("complete", "dual_head", "single_flow", None,
-              "完整标签：双头多任务 − 单任务 Q", "fig_paired_complete_flow.png")]
-    for ratio in (30, 50, 70):
-        pairs.append((f"q_holdout{ratio}", "dual_head", "single_flow", True,
-                      f"留出 {ratio}% 流域：被留出流域上的双头 − 单任务 Q",
-                      f"fig_paired_holdout{ratio}_flow.png"))
-    for scenario, arch_a, arch_b, held, title, name in pairs:
-        sub = base[base["scenario"] == scenario]
-        if held is not None and "held_out" in sub.columns:
-            sub = sub[sub["held_out"] == held]
-        a = sub[sub["architecture"] == arch_a]
-        b = sub[sub["architecture"] == arch_b]
-        if a.empty or b.empty:
-            print(f"  {scenario}：缺少 {arch_a} 或 {arch_b}，跳过")
-            continue
-        diff = paired_differences(a, b, "flow", "nse")
-        if len(diff) < 3:
-            print(f"  {scenario}：可配对流域不足，跳过")
-            continue
-        fig_paired_difference(diff, title, name)
+        # Major 3：缺失下降曲线。基线是同一架构自己的完整标签结果
+        deg = degradation(sub, baseline_scenario="complete", metric="nse")
+        for task in ("flow", "waterlevel"):
+            if fig_missing_degradation(deg, task=task,
+                                       name=f"fig_missing_degradation_{task}{tag}.png") is None:
+                print(f"  {TASK_LABEL[task]}：缺失情景不足，跳过下降图")
 
-    # Major 8：代表性流域过程线，同一流域上把两个架构画在一起
+        # Minor 8：逐流域配对差值。第一张是完整标签下的多任务增益（效应量很小，
+        # 必须让读者看到分布而不是只看均值）；后面几张是论文主命题——某些流域
+        # 的径流标签被整段删除后，水位监督能不能顶上
+        pairs = [("complete", None, f"完整标签：双头多任务 − 单任务 Q（{config}）",
+                  f"fig_paired_complete_flow{tag}.png")]
+        for ratio in (30, 50, 70):
+            pairs.append((f"q_holdout{ratio}", True,
+                          f"留出 {ratio}% 流域：被留出流域上的双头 − 单任务 Q（{config}）",
+                          f"fig_paired_holdout{ratio}_flow{tag}.png"))
+        for scenario, held, title, name in pairs:
+            part = sub[sub["scenario"] == scenario]
+            if held is not None and "held_out" in part.columns:
+                flag = part["held_out"].astype(str).str.lower().isin(("true", "1"))
+                part = part[flag == held]
+            a = part[part["architecture"] == "dual_head"]
+            b = part[part["architecture"] == "single_flow"]
+            if a.empty or b.empty:
+                print(f"  {scenario}：缺少 dual_head 或 single_flow，跳过")
+                continue
+            diff = paired_differences(a, b, "flow", "nse")
+            if len(diff) < 3:
+                print(f"  {scenario}：可配对流域不足，跳过")
+                continue
+            fig_paired_difference(diff, title, name)
+
+    # Major 8：代表性流域过程线，同一流域上把两个架构画在一起（仅 base 有时序）
     runs = _runs_with_timeseries()
     if not runs:
         print("无已导出的测试期时序，跳过过程线图")
         return
+    base = metrics[metrics["config"] == "base"]
     print("生成过程线图:")
     ref = runs.get("dual_head") or next(iter(runs.values()))
     for basin in _pick_basins(base, ref, task="flow"):

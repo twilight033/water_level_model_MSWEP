@@ -78,12 +78,16 @@ def predict_waterlevel(prepared, ckpt_path: Path, seq_length: int = 168,
             "target_pos": np.concatenate(pos_chunks)}
 
 
-def _global_rating(prepared, fit_basins) -> tuple:
+def _global_rating(prepared, fit_basins, q_norm: np.ndarray) -> tuple:
+    """在 fit_basins 的训练段上拟合 归一化水位 → 归一化径流 的区域化率定关系。
+
+    q_norm 是径流的归一化矩阵，由调用方决定口径（实测统计量或物理尺度）。
+    """
     hs, qs = [], []
     for basin in fit_basins:
         bi = prepared.basin_index[basin]
         lo, hi = prepared.split_range(basin, "train")
-        q = prepared.targets["flow"][bi, lo:hi + 1].astype(float)
+        q = q_norm[bi, lo:hi + 1].astype(float)
         h = prepared.targets["waterlevel"][bi, lo:hi + 1].astype(float)
         ok = np.isfinite(q) & np.isfinite(h)
         if ok.any():
@@ -93,8 +97,22 @@ def _global_rating(prepared, fit_basins) -> tuple:
 
 
 def two_stage_scores(prepared, ratio: float = 0.70, mask_seeds=(42, 123, 456),
-                     max_wl_seeds: int = 3, seq_length: int = 168) -> pd.DataFrame:
-    """逐流域的两阶段基线径流 NSE，在掩膜种子与模型种子上取平均。"""
+                     max_wl_seeds: int = 3, seq_length: int = 168,
+                     scaling: str = "observed") -> pd.DataFrame:
+    """逐流域的两阶段基线径流 NSE，在掩膜种子与模型种子上取平均。
+
+    scaling 决定率定关系落在哪个径流空间：
+
+    - ``observed``：逐流域实测 z-score。率定表把预测水位映射成"该流域实测
+      均值方差下的 z 值"，换回流量要用留出流域自己的实测统计量——这与 base
+      配置的模型拿到的信息一致，只能拿来对比 base 配置。
+    - ``physical``：径流尺度由 面积×降水 回归给出，回归只在保留流域上拟合，
+      留出流域零径流观测。这才是与 4H_physical 配置公平的基线；用实测口径的
+      基线去比 physical 的双头，等于让基线多拿了一份模型没有的信息。
+
+    水位在两种口径下都用实测统计量：留出情景的前提就是该流域有水位记录。
+    """
+    from pipeline.dataset import TargetScaling
     from pipeline.masking import get_hidden
 
     wl_runs = available_waterlevel_runs(max_wl_seeds)
@@ -111,7 +129,10 @@ def two_stage_scores(prepared, ratio: float = 0.70, mask_seeds=(42, 123, 456),
                              mechanism="basin_holdout", mask_seed=mask_seed)
         held = set(stats["per_task"]["flow"]["held_out_basins"])
         kept = [b for b in prepared.splits["splits"] if b not in held]
-        rating = _global_rating(prepared, kept)
+        # 物理尺度必须按掩膜种子重新拟合：哪些流域算"有资料"随留出集变化
+        q_norm = (TargetScaling(prepared, scaling, fit_basins=kept).normalized["flow"]
+                  if scaling == "physical" else prepared.targets["flow"])
+        rating = _global_rating(prepared, kept, q_norm)
         if rating is None:
             continue
 
@@ -122,7 +143,8 @@ def two_stage_scores(prepared, ratio: float = 0.70, mask_seeds=(42, 123, 456),
                 if sel.sum() < 500:
                     continue
                 pos = pred["target_pos"][sel]
-                q_obs = prepared.targets["flow"][bi, pos].astype(float)
+                # NSE 对逐流域仿射变换不变，在归一化空间算与原始流量空间一致
+                q_obs = q_norm[bi, pos].astype(float)
                 q_hat = apply_rating(rating, pred["pred_h"][sel].astype(float))
                 score = nse(q_obs, q_hat)
                 if np.isfinite(score):
@@ -175,18 +197,28 @@ def main():
     prep = PreparedData()
     print(f"复用的单任务水位模型: {[s for s, _ in available_waterlevel_runs()]}")
 
+    metrics, _ = load_summary()
+    configs = [c for c in ("base", "physical") if c in set(metrics["config"])]
+
     all_cmp = []
-    for ratio in (0.30, 0.50, 0.70):
-        ts = two_stage_scores(prep, ratio)
-        path = SUMMARY_DIR / f"two_stage_holdout{int(ratio * 100)}.csv"
-        ts.to_csv(path, index=False, encoding="utf-8-sig")
-        cmp = compare_with_models(ts, ratio)
-        all_cmp.append(cmp)
-        print(f"\n留出 {ratio:.0%}：两阶段基线 n={len(ts)}  均值 NSE {ts.nse.mean():.4f}")
-        if not cmp.empty:
-            print(cmp[["model", "two_stage_nse", "model_nse",
-                       "diff_model_minus_two_stage", "wilcoxon_p",
-                       "n_model_better", "n_two_stage_better"]].round(4).to_string(index=False))
+    for config in configs:
+        # base 配置对 observed 口径的基线；physical 配置对 physical 口径的基线
+        scaling = "physical" if config == "physical" else "observed"
+        for ratio in (0.30, 0.50, 0.70):
+            ts = two_stage_scores(prep, ratio, scaling=scaling)
+            suffix = "" if scaling == "observed" else "_physical"
+            path = SUMMARY_DIR / f"two_stage_holdout{int(ratio * 100)}{suffix}.csv"
+            ts.to_csv(path, index=False, encoding="utf-8-sig")
+            cmp = compare_with_models(ts, ratio, config=config)
+            cmp["rating_scaling"] = scaling
+            all_cmp.append(cmp)
+            print()
+            print(f"[{config} 配置 / {scaling} 口径] 留出 {ratio:.0%}："
+                  f"两阶段基线 n={len(ts)}  均值 NSE {ts.nse.mean():.4f}")
+            if not cmp.empty:
+                print(cmp[["model", "two_stage_nse", "model_nse",
+                           "diff_model_minus_two_stage", "wilcoxon_p",
+                           "n_model_better", "n_two_stage_better"]].round(4).to_string(index=False))
 
     if all_cmp:
         merged = pd.concat(all_cmp, ignore_index=True)

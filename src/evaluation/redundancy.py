@@ -192,7 +192,10 @@ def main():
         return
 
     metrics, _ = load_summary()
-    corr = gain_correlation_table(table, metrics)
+    # 每个含留出情景的配置各算一份：base 与 physical 下的相关性可能不同
+    configs = sorted(set(metrics[metrics["scenario"].str.startswith("q_holdout")]["config"]))
+    corr = pd.concat([gain_correlation_table(table, metrics, config=c) for c in configs],
+                     ignore_index=True) if configs else pd.DataFrame()
     if corr.empty:
         print()
         print("可配对的运行不足，跳过相关性分析")
@@ -201,7 +204,7 @@ def main():
     corr.to_csv(out, index=False, encoding="utf-8-sig")
     print()
     print("多任务增益与 Q–h 冗余度的相关性（同一可比配置内）:")
-    cols = [c for c in ("scenario", "task", "held_out", "n", "mean_gain",
+    cols = [c for c in ("config", "scenario", "task", "held_out", "n", "mean_gain",
                         "spearman_r2_h_given_q", "p_r2_h_given_q",
                         "spearman_hysteresis", "p_hysteresis") if c in corr]
     print(corr[cols].round(4).to_string(index=False))
