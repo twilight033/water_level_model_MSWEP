@@ -66,7 +66,7 @@ def predict_waterlevel(prepared, ckpt_path: Path, seq_length: int = 168,
     model.eval()
 
     ds = WindowDataset(prepared, "test", seq_length, 1, tasks=("waterlevel",))
-    loader = make_loader(ds, 4096, shuffle=False)
+    loader = make_loader(ds, 512, shuffle=False)   # 推理 batch 只关乎显存，见 TrainConfig.batch_size_eval
     pred_chunks, bi_chunks, pos_chunks = [], [], []
     for x, c, _, _, bi, pos in loader:
         out = model(x.to(device), c.to(device))["waterlevel"].squeeze(-1)
