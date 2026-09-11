@@ -40,10 +40,6 @@ class TrainConfig:
     window_step_eval: int = 8         # 验证用，早停判据
     window_step_test: int = 1         # 最终测试，逐步长评估以导出完整时序
     batch_size: int = 512
-    # 推理 batch 只影响吞吐与显存，不影响任何数值。曾设 4096：cuDNN LSTM 推理会
-    # 物化整段序列的中间量，L=480 时一批就要 13.5 GB，在 12 GB 卡上溢到系统
-    # 内存；降到 512 后峰值 1.4 GB，实测耗时不变（验证集 2.3 s vs 2.5 s）。
-    batch_size_eval: int = 512
     hidden_size: int = 64
     dropout_rate: float = 0.2
     learning_rate: float = 1e-3
@@ -237,8 +233,8 @@ def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
 
     generator = torch.Generator().manual_seed(cfg.model_seed)
     tr_loader = make_loader(ds_train, cfg.batch_size, shuffle=True, generator=generator)
-    va_loader = make_loader(ds_valid, cfg.batch_size_eval, shuffle=False)
-    te_loader = make_loader(ds_test, cfg.batch_size_eval, shuffle=False)
+    va_loader = make_loader(ds_valid, 4096, shuffle=False)
+    te_loader = make_loader(ds_test, 4096, shuffle=False)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
     scheduler = None
