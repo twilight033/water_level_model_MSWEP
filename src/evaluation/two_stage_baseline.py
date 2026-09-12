@@ -43,6 +43,8 @@ WL_SOURCES = {
     "base":          ("4A_main_complete_single_waterlevel_ms", "",               "base",     168, "observed"),
     "physical":      ("4A_main_complete_single_waterlevel_ms", "",               "base",     168, "physical"),
     "L480+extended": ("4J_best_complete_single_waterlevel_ms", "_L480_extended", "extended", 480, "observed"),
+    # 4K 复用 4J 的水位权重：物理归一化不碰水位头（4H 实测与 base 逐值相同）
+    "L480+physical+extended": ("4J_best_complete_single_waterlevel_ms", "_L480_extended", "extended", 480, "physical"),
 }
 
 

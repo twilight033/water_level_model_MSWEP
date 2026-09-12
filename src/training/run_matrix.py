@@ -153,6 +153,20 @@ def build_matrix(scale: str = "full") -> list:
                     add("4J_best", arch, scenario, ms, mask_seed=xs,
                         attr_set="extended", seq_length=480)
 
+    # 4-K 最强配置 + 物理归一化：审稿人两条最尖锐的质疑同时成立时主命题是否仍立。
+    # 4H 证明去掉流量量级后主结论不变，4J 证明模型调强后主结论更强，
+    # 二者叠加此前未验证。
+    for arch in ("single_flow", "single_waterlevel", "dual_head"):
+        for seed in main_seeds[:5]:
+            add("4K_best_physical", arch, "complete", seed,
+                attr_set="extended", seq_length=480, target_scaling="physical")
+    for scenario in ("q_holdout30", "q_holdout50", "q_holdout70"):
+        for arch in ("single_flow", "dual_head"):
+            for ms in miss_model_seeds:
+                for xs in miss_mask_seeds:
+                    add("4K_best_physical", arch, scenario, ms, mask_seed=xs,
+                        attr_set="extended", seq_length=480, target_scaling="physical")
+
     return entries
 
 
