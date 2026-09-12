@@ -291,8 +291,10 @@ def fig_paired_difference(per_basin: pd.DataFrame, title: str, name: str):
 
 def fig_missing_degradation(deg: pd.DataFrame, task="flow", name=None):
     """缺失比例 vs 相对自身完整标签基线的下降幅度。"""
-    ratio_of = {"q30_seg": 30, "q50_seg": 50, "q70_seg": 70,
-                "h50_seg": 50, "both50_seg": 50}
+    # 按任务取自己那一路的缺失情景。both50_seg 是"两种标签同时缺"的单点对照，
+    # 不能标成 50 混进曲线——此前它与 q50_seg 落在同一横坐标上被平均
+    prefix = {"flow": "q", "waterlevel": "h"}[task]
+    ratio_of = {f"{prefix}{r}_seg": r for r in (30, 50, 70)}
     sub = deg[(deg["task"] == task) & deg["scenario"].isin(ratio_of)].copy()
     if sub.empty:
         return None

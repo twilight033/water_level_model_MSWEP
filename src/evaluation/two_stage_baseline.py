@@ -34,17 +34,29 @@ from evaluation.run_config import SUMMARY_DIR, load_summary, select  # noqa: E40
 from pipeline.paths import RESULTS_ROOT  # noqa: E402
 
 RUNS_DIR = RESULTS_ROOT / "runs"
-WL_RUN_PREFIX = "4A_main_complete_single_waterlevel_ms"
+
+# 每个可比配置该用哪一批单任务水位权重：(run_key 前缀, 后缀, 属性集, 窗口长度,
+# 率定关系的径流口径)。同口径才公平——L480+extended 的双头要对上同样用 60 天
+# 窗口与扩展属性训出来的水位模型，否则率定基线天然吃亏。
+# physical 不改水位头，权重与 4A 完全相同，只是率定关系换到物理尺度空间。
+WL_SOURCES = {
+    "base":          ("4A_main_complete_single_waterlevel_ms", "",               "base",     168, "observed"),
+    "physical":      ("4A_main_complete_single_waterlevel_ms", "",               "base",     168, "physical"),
+    "L480+extended": ("4J_best_complete_single_waterlevel_ms", "_L480_extended", "extended", 480, "observed"),
+}
 
 
-def available_waterlevel_runs(max_seeds: int = 3) -> list:
-    """找出可复用的单任务水位模型权重，按种子号排序。"""
+def available_waterlevel_runs(config: str = "base", max_seeds: int = 3) -> list:
+    """找出该配置可复用的单任务水位模型权重，按种子号排序。"""
+    import re
+
+    prefix, suffix, *_ = WL_SOURCES[config]
     runs = []
-    for path in sorted(RUNS_DIR.glob(f"{WL_RUN_PREFIX}*")):
+    for path in sorted(RUNS_DIR.glob(f"{prefix}*{suffix}")):
         ckpt = path / "model.pt"
-        if ckpt.exists():
-            seed = int(path.name.replace(WL_RUN_PREFIX, ""))
-            runs.append((seed, ckpt))
+        found = re.fullmatch(rf"{re.escape(prefix)}(\d+){re.escape(suffix)}", path.name)
+        if ckpt.exists() and found:
+            runs.append((int(found.group(1)), ckpt))
     runs.sort()
     return runs[:max_seeds]
 
@@ -98,7 +110,7 @@ def _global_rating(prepared, fit_basins, q_norm: np.ndarray) -> tuple:
 
 def two_stage_scores(prepared, ratio: float = 0.70, mask_seeds=(42, 123, 456),
                      max_wl_seeds: int = 3, seq_length: int = 168,
-                     scaling: str = "observed") -> pd.DataFrame:
+                     scaling: str = "observed", config: str = "base") -> pd.DataFrame:
     """逐流域的两阶段基线径流 NSE，在掩膜种子与模型种子上取平均。
 
     scaling 决定率定关系落在哪个径流空间：
@@ -115,10 +127,12 @@ def two_stage_scores(prepared, ratio: float = 0.70, mask_seeds=(42, 123, 456),
     from pipeline.dataset import TargetScaling
     from pipeline.masking import get_hidden
 
-    wl_runs = available_waterlevel_runs(max_wl_seeds)
+    wl_runs = available_waterlevel_runs(config, max_wl_seeds)
     if not wl_runs:
+        prefix, suffix, *_ = WL_SOURCES[config]
         raise FileNotFoundError(
-            f"未找到可复用的单任务水位模型权重（{RUNS_DIR}/{WL_RUN_PREFIX}*/model.pt）")
+            f"未找到 {config} 配置可复用的单任务水位模型权重"
+            f"（{RUNS_DIR}/{prefix}*{suffix}/model.pt）")
 
     predictions = {seed: predict_waterlevel(prepared, ckpt, seq_length)
                    for seed, ckpt in wl_runs}
@@ -194,27 +208,35 @@ def main():
     from pipeline.dataset import PreparedData
 
     SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
-    prep = PreparedData()
-    print(f"复用的单任务水位模型: {[s for s, _ in available_waterlevel_runs()]}")
-
     metrics, _ = load_summary()
-    configs = [c for c in ("base", "physical") if c in set(metrics["config"])]
+    configs = [c for c in WL_SOURCES if c in set(metrics["config"])]
+
+    # 不同属性集的 PreparedData 维度不同，按需构造并缓存
+    prepared_cache = {}
+
+    def get_prepared(attr_set):
+        if attr_set not in prepared_cache:
+            prepared_cache[attr_set] = PreparedData(attr_set=attr_set)
+        return prepared_cache[attr_set]
 
     all_cmp = []
     for config in configs:
-        # base 配置对 observed 口径的基线；physical 配置对 physical 口径的基线
-        scaling = "physical" if config == "physical" else "observed"
+        _, suffix, attr_set, seq_length, scaling = WL_SOURCES[config]
+        prep = get_prepared(attr_set)
+        seeds = [s for s, _ in available_waterlevel_runs(config)]
+        print()
+        print(f"[{config}] 复用的单任务水位模型种子: {seeds}  "
+              f"窗口 {seq_length}  属性集 {attr_set}  率定口径 {scaling}")
         for ratio in (0.30, 0.50, 0.70):
-            ts = two_stage_scores(prep, ratio, scaling=scaling)
-            suffix = "" if scaling == "observed" else "_physical"
-            path = SUMMARY_DIR / f"two_stage_holdout{int(ratio * 100)}{suffix}.csv"
+            ts = two_stage_scores(prep, ratio, seq_length=seq_length,
+                                  scaling=scaling, config=config)
+            tag = ("_physical" if scaling == "physical" else "") + suffix
+            path = SUMMARY_DIR / f"two_stage_holdout{int(ratio * 100)}{tag}.csv"
             ts.to_csv(path, index=False, encoding="utf-8-sig")
             cmp = compare_with_models(ts, ratio, config=config)
             cmp["rating_scaling"] = scaling
             all_cmp.append(cmp)
-            print()
-            print(f"[{config} 配置 / {scaling} 口径] 留出 {ratio:.0%}："
-                  f"两阶段基线 n={len(ts)}  均值 NSE {ts.nse.mean():.4f}")
+            print(f"  留出 {ratio:.0%}：两阶段基线 n={len(ts)}  均值 NSE {ts.nse.mean():.4f}")
             if not cmp.empty:
                 print(cmp[["model", "two_stage_nse", "model_nse",
                            "diff_model_minus_two_stage", "wilcoxon_p",
