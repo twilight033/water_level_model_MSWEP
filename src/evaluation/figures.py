@@ -236,8 +236,7 @@ def fig_main_experiment(metrics: pd.DataFrame, metric="nse", config="base"):
         ax.set_xlim(0, max(np.array(means) + np.array(sds)) * 1.35)
         _finish(ax, title=TASK_LABEL[task], xlabel=metric.upper(), grid_axis="x")
     _suptitle(fig, "主实验：完整标签下各架构表现（误差棒为跨模型种子标准差）")
-    suffix = "" if config == "base" else f"_{config}"
-    return _save(fig, f"fig_main_experiment_{metric}{suffix}.png")
+    return _save(fig, f"fig_main_experiment_{metric}{_tag(config)}.png")
 
 
 def fig_paired_difference(per_basin: pd.DataFrame, title: str, name: str):
@@ -251,9 +250,11 @@ def fig_paired_difference(per_basin: pd.DataFrame, title: str, name: str):
     # 少数流域的单任务 NSE 极负，差值能到 +3 以上，按满量程画会把其余 80 多个
     # 流域压成一条线。截断纵轴并注明被截掉多少个，同时给出中位数——均值受这几
     # 个离群值影响很大，只报均值是不诚实的
-    span = float(np.percentile(np.abs(d), 98)) if d.size else 0.0
-    clipped = int((np.abs(d) > span).sum()) if span > 0 else 0
-    use_clip = span > 0 and np.abs(d).max() > 3 * span
+    # 用 90 分位定量程：98 分位在 85 个流域里就是第 2 大的值，只要离群值有两个
+    # 以上就会把量程一起抬高，截断永远触发不了
+    span = float(np.percentile(np.abs(d), 90)) if d.size else 0.0
+    use_clip = span > 0 and np.abs(d).max() > 2 * span
+    clipped = int((np.abs(d) > span * 1.15).sum()) if use_clip else 0
 
     ax = axes[0]
     colors = np.where(d[order] >= 0, SERIES["orange"], SERIES["blue"])
@@ -267,10 +268,12 @@ def fig_paired_difference(per_basin: pd.DataFrame, title: str, name: str):
             va="top", fontsize=8, color=INK_SOFT)
     if use_clip:
         ax.set_ylim(-span * 1.15, span * 1.15)
-        ax.text(0.98, 0.95, f"{clipped} 个流域超出范围（最大 {d.max():+.2f}）",
-                transform=ax.transAxes, ha="right", va="top", fontsize=8,
+        # 放左上角：排序后大值都在右侧，右上角会被截断的柱子盖住
+        ax.text(0.02, 0.95, f"{clipped} 个流域超出范围（最大 {d.max():+.2f}）",
+                transform=ax.transAxes, ha="left", va="top", fontsize=8,
                 color=INK_SOFT)
-    _finish(ax, title=title, xlabel="流域（按差值排序）", ylabel="NSE 差值")
+    # 长标题放总标题位，子图标题留短的，免得压住右侧"分布"
+    _finish(ax, title="逐流域差值（排序）", xlabel="流域", ylabel="NSE 差值")
 
     ax2 = axes[1]
     bins = np.linspace(-span * 1.15, span * 1.15, 21) if use_clip else 20
@@ -284,6 +287,7 @@ def fig_paired_difference(per_basin: pd.DataFrame, title: str, name: str):
     ax2.text(0.95, 0.02, f"改善 {n_up} / 变差 {d.size - n_up}",
              transform=ax2.transAxes, ha="right", fontsize=8, color=INK_SOFT)
     _finish(ax2, title="分布", xlabel="流域数", grid_axis="x")
+    _suptitle(fig, title)
     return _save(fig, name)
 
 
