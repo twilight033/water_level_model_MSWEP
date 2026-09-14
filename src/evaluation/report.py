@@ -279,7 +279,14 @@ def main():
         "training_budget.csv": training_budget_table(runs),
     }
     if {"scenario", "mask_seed"} <= set(metrics.columns):
-        outputs["seed_variance.csv"] = seed_variance(metrics)
+        # 种子方差同样要按可比配置分开：同一 (model_seed, mask_seed) 在不同配置下
+        # 各有一次运行，混在一起会把配置差异算进"种子方差"
+        parts = []
+        for config, sub in metrics.groupby("config"):
+            part = seed_variance(sub)
+            part.insert(0, "config", config)
+            parts.append(part)
+        outputs["seed_variance.csv"] = pd.concat(parts, ignore_index=True)
 
     for name, frame in outputs.items():
         if frame is None or frame.empty:
