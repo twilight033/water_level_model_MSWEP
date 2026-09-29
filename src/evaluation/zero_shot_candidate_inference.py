@@ -173,7 +173,8 @@ def predict(model, forcing: np.ndarray, attrs: np.ndarray, grid: pd.DatetimeInde
     # CSV 缺一个时刻时，DataFrame 的行位置仍连续，但真实时间并不连续。该时刻
     # 及任何跨越它的窗口都不能送入模型，否则会把 6 小时误当作一个 3 小时步长。
     step_ok = np.r_[True, np.diff(grid.asi8) == pd.Timedelta(hours=3).value]
-    valid = np.isfinite(forcing).all(axis=(1, 2)) & step_ok[None, :]
+    # forcing 形状为 [流域, 时刻, 变量]；只沿变量维度归约，保留每个时刻的有效性。
+    valid = np.isfinite(forcing).all(axis=2) & step_ok[None, :]
     positions = []
     basin_idx = []
     for bi in range(n_basin):
