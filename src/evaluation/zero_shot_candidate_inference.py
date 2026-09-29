@@ -55,6 +55,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--duplicate-policy", choices=("first", "error"), default="first",
                         help="MSWEP 重复时间的处理；first 与原 86 流域导出规则一致")
+    parser.add_argument("--target-scaling", choices=("physical", "observed"), default="physical",
+                        help="physical 为无 Q 情景；observed 为已知历史 Q 尺度的诊断上限")
+    parser.add_argument("--observed-fit-ratio", type=float, default=0.60,
+                        help="observed 模式用每流域前多少比例的有效 Q 拟合尺度，余下时段评估")
     return parser.parse_args()
 
 
@@ -169,6 +173,26 @@ def physical_scale(raw_attrs: pd.DataFrame, checkpoint_blob: dict,
     return mean.astype("float32"), np.maximum(std, 1e-6).astype("float32")
 
 
+def observed_scale(q_matrix: np.ndarray, fit_ratio: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """用每流域前段实测 Q 的均值/标准差还原 observed 模型，并划出后段评估期。"""
+    if not 0 < fit_ratio < 1:
+        raise ValueError("--observed-fit-ratio 必须在 0 与 1 之间")
+    n_basin = q_matrix.shape[0]
+    means = np.empty(n_basin, dtype="float32")
+    stds = np.empty(n_basin, dtype="float32")
+    eval_start = np.empty(n_basin, dtype=np.int64)
+    for bi in range(n_basin):
+        valid_pos = np.flatnonzero(np.isfinite(q_matrix[bi]))
+        n_fit = int(len(valid_pos) * fit_ratio)
+        if n_fit < 2 or n_fit >= len(valid_pos):
+            raise ValueError(f"流域索引 {bi} 的有效 Q 不足，无法划分 observed 诊断期")
+        fit_values = q_matrix[bi, valid_pos[:n_fit]].astype("float64")
+        means[bi] = float(fit_values.mean())
+        stds[bi] = max(float(fit_values.std(ddof=0)), 1e-6)
+        eval_start[bi] = valid_pos[n_fit]
+    return means, stds, eval_start
+
+
 @torch.no_grad()
 def predict(model, forcing: np.ndarray, attrs: np.ndarray, grid: pd.DatetimeIndex, seq_length: int,
             batch_size: int, device: str) -> tuple[np.ndarray, np.ndarray]:
@@ -223,8 +247,12 @@ def main() -> None:
     cfg = blob["model_config"]
     if cfg["architecture"] != "dual_head":
         raise ValueError(f"检查点不是双头模型: {cfg['architecture']}")
-    if blob.get("config", {}).get("target_scaling") != "physical":
-        raise ValueError("零样本流量推理必须使用 physical target scaling 的检查点")
+    checkpoint_scaling = blob.get("config", {}).get("target_scaling")
+    if checkpoint_scaling != args.target_scaling:
+        raise ValueError(
+            f"检查点 target_scaling={checkpoint_scaling!r}，但参数要求 {args.target_scaling!r}；"
+            "请使用同口径的检查点"
+        )
 
     mswep = read_mswep(args.mswep_csv, basins, args.duplicate_policy)
     temp, solar, q_obs = read_camelsh(basins)
@@ -252,16 +280,23 @@ def main() -> None:
     model.eval()
     device = next(model.parameters()).device.type + (":0" if next(model.parameters()).device.type == "cuda" else "")
     bi, pos, q_norm = predict(model, forcing, attrs, grid, 480, args.batch_size, device)
-    q_mean, q_std = physical_scale(raw_attrs, blob, run_meta)
+    q_matrix = q_obs.reindex(grid, columns=basins).to_numpy("float32").T
+    if args.target_scaling == "physical":
+        q_mean, q_std = physical_scale(raw_attrs, blob, run_meta)
+        eval_start = np.zeros(len(basins), dtype=np.int64)
+    else:
+        q_mean, q_std, eval_start = observed_scale(q_matrix, args.observed_fit_ratio)
     q_hat = q_norm * q_std[bi] + q_mean[bi]
-    observed = q_obs.reindex(grid, columns=basins).to_numpy("float32").T[bi, pos]
+    observed = q_matrix[bi, pos]
 
     result = pd.DataFrame({
         "time": grid[pos], "basin": np.array(basins, dtype=object)[bi],
         "q_observed": observed, "q_predicted": q_hat,
+        "evaluation_period": pos >= eval_start[bi],
     })
     rows = []
     for basin, part in result.groupby("basin", sort=True):
+        part = part[part["evaluation_period"]]
         rows.append({"basin": basin, "n_predictions": len(part),
                      "n_observed_q": int(part.q_observed.notna().sum()),
                      "nse": nse(part.q_observed.to_numpy(), part.q_predicted.to_numpy())})
@@ -274,7 +309,8 @@ def main() -> None:
         "kind": "zero_shot_only", "checkpoint": str(args.checkpoint.resolve()),
         "mswep_csv": str(args.mswep_csv.resolve()), "basins": basins,
         "time_start": str(grid.min()), "time_end": str(grid.max()),
-        "seq_length": 480, "target_scaling": "physical",
+        "seq_length": 480, "target_scaling": args.target_scaling,
+        "observed_fit_ratio": args.observed_fit_ratio if args.target_scaling == "observed" else None,
         "duplicate_policy": args.duplicate_policy,
         "note": "结果仅用于零样本接入检查，非重新训练后的正式外部验证。",
     }, ensure_ascii=False, indent=2), encoding="utf-8")
