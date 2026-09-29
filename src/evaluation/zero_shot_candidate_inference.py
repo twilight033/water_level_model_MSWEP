@@ -79,7 +79,24 @@ def read_mswep(path: Path, basins: list[str]) -> pd.DataFrame:
                      dtype={b: "float32" for b in basins})
     df = df.set_index("time").sort_index()
     if df.index.duplicated().any():
-        raise ValueError(f"MSWEP 文件有 {int(df.index.duplicated().sum())} 个重复时间戳")
+        # 分段下载或拼接年份文件时，边界时刻常会重复。若同一时刻 14 列取值一致，
+        # 保留第一条与既有 export_forcing.py 的处理一致；若值冲突则不能静默选择。
+        duplicated = df.index.duplicated(keep=False)
+        duplicate_rows = df.loc[duplicated]
+        conflict_times = []
+        for timestamp, group in duplicate_rows.groupby(level=0, sort=False):
+            # NaN 也视为一种取值，避免“一个缺失、一个有值”被误判为一致。
+            if (group.nunique(dropna=False) > 1).any():
+                conflict_times.append(timestamp)
+        if conflict_times:
+            examples = ", ".join(str(t) for t in conflict_times[:3])
+            raise ValueError(
+                f"MSWEP 文件有 {len(conflict_times)} 个重复时间且降雨值冲突，"
+                f"例如 {examples}；请先确认拼接规则"
+            )
+        n_repeat = int(df.index.duplicated().sum())
+        print(f"警告：MSWEP 文件有 {n_repeat} 条重复时间记录，数值一致，保留第一条")
+        df = df[~df.index.duplicated(keep="first")]
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError("MSWEP time 列无法解析为时间")
     return df.reindex(columns=basins)
