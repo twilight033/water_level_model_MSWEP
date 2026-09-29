@@ -1,5 +1,7 @@
 README.md
 pyproject.toml
+tests/test_parallel_multitask.py
+tests/test_pipeline.py
 water_level_model.egg-info/PKG-INFO
 water_level_model.egg-info/SOURCES.txt
 water_level_model.egg-info/dependency_links.txt

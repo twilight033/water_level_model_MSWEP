@@ -114,7 +114,8 @@ def build_redundancy_table(prepared=None) -> pd.DataFrame:
 def correlate_with_gain(redundancy: pd.DataFrame, metrics: pd.DataFrame,
                         task: str = "flow", metric: str = "nse",
                         config: str = "base", scenario: str = "complete",
-                        held_out=None) -> dict:
+                        held_out=None,
+                        columns=("r2_h_given_q", "nonredundancy", "hysteresis")) -> dict:
     """检验多任务增益是否与 h 相对 Q 的冗余程度相关。
 
     增益定义为逐流域 (双头 - 对应单任务) 的差值，先在模型/掩膜种子上取平均。
@@ -126,6 +127,9 @@ def correlate_with_gain(redundancy: pd.DataFrame, metrics: pd.DataFrame,
 
     ``r2_h_given_q`` 与 ``nonredundancy`` 互为 1 减，相关系数符号相反：前者是
     "h 作为 Q 的代理有多好"，替代命题要看的是它；只报后者容易把方向讲反。
+
+    ``columns`` 是 ``redundancy`` 中要与增益求相关的列，默认为本模块的三个指标；
+    ``usgs_rating_metadata`` 用它传入官方率定曲线的改版次数，复用同一套配对口径。
     """
     from scipy import stats as sps
 
@@ -144,7 +148,9 @@ def correlate_with_gain(redundancy: pd.DataFrame, metrics: pd.DataFrame,
            "mean_gain": float(joined["gain"].mean()) if len(joined) else float("nan")}
     if len(joined) < 5:
         return out
-    for col in ("r2_h_given_q", "nonredundancy", "hysteresis"):
+    for col in columns:
+        if col not in joined:
+            continue
         vals = joined[[col, "gain"]].dropna()
         if len(vals) < 5:
             continue
