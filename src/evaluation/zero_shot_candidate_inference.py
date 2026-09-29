@@ -151,9 +151,13 @@ def build_attrs(basins: list[str], stats: dict) -> np.ndarray:
     return ((raw.to_numpy(dtype="float32") - mean) / std).astype("float32"), raw
 
 
-def physical_scale(raw_attrs: pd.DataFrame, blob: dict) -> tuple[np.ndarray, np.ndarray]:
-    """用检查点保存的面积×降水回归恢复新流域的 Q 尺度，不使用新流域 Q。"""
-    info = blob.get("scaling_info", {}).get("flow")
+def physical_scale(raw_attrs: pd.DataFrame, checkpoint_blob: dict,
+                   run_meta: dict) -> tuple[np.ndarray, np.ndarray]:
+    """用运行记录的面积×降水回归恢复新流域 Q 尺度，不使用新流域 Q。"""
+    # model.pt 只存模型权重与网络配置；可复现实验的尺度回归写在同目录 run.json。
+    # 同时兼容未来把 scaling_info 直接写入检查点的版本。
+    info = (checkpoint_blob.get("scaling_info", {}).get("flow")
+            or run_meta.get("scaling_info", {}).get("flow"))
     if not info or "mean" not in info or "std" not in info:
         raise ValueError("检查点不含 physical 径流尺度信息；请使用 4K physical 模型")
     proxy = raw_attrs["area"].to_numpy(float) * raw_attrs["p_mean"].to_numpy(float)
@@ -212,6 +216,10 @@ def main() -> None:
 
     stats = load_norm_stats()
     blob = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    run_json = args.checkpoint.parent / "run.json"
+    if not run_json.is_file():
+        raise FileNotFoundError(f"检查点同目录缺少运行记录: {run_json}")
+    run_meta = json.loads(run_json.read_text(encoding="utf-8"))
     cfg = blob["model_config"]
     if cfg["architecture"] != "dual_head":
         raise ValueError(f"检查点不是双头模型: {cfg['architecture']}")
@@ -244,7 +252,7 @@ def main() -> None:
     model.eval()
     device = next(model.parameters()).device.type + (":0" if next(model.parameters()).device.type == "cuda" else "")
     bi, pos, q_norm = predict(model, forcing, attrs, grid, 480, args.batch_size, device)
-    q_mean, q_std = physical_scale(raw_attrs, blob)
+    q_mean, q_std = physical_scale(raw_attrs, blob, run_meta)
     q_hat = q_norm * q_std[bi] + q_mean[bi]
     observed = q_obs.reindex(grid, columns=basins).to_numpy("float32").T[bi, pos]
 
