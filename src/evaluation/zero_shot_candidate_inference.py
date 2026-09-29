@@ -53,6 +53,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", default=None, help="可选起始时间，例如 2007-10-01")
     parser.add_argument("--end", default=None, help="可选结束时间，例如 2024-12-31")
     parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument("--duplicate-policy", choices=("first", "error"), default="first",
+                        help="MSWEP 重复时间的处理；first 与原 86 流域导出规则一致")
     return parser.parse_args()
 
 
@@ -67,7 +69,7 @@ def nse(obs: np.ndarray, pred: np.ndarray) -> float:
     return float("nan") if denom <= 0 else float(1 - np.square(obs - pred).sum() / denom)
 
 
-def read_mswep(path: Path, basins: list[str]) -> pd.DataFrame:
+def read_mswep(path: Path, basins: list[str], duplicate_policy: str) -> pd.DataFrame:
     """读取并校验用户生成的降水表。"""
     header = pd.read_csv(path, nrows=0).columns.astype(str).tolist()
     missing = [b for b in basins if b not in header]
@@ -79,8 +81,10 @@ def read_mswep(path: Path, basins: list[str]) -> pd.DataFrame:
                      dtype={b: "float32" for b in basins})
     df = df.set_index("time").sort_index()
     if df.index.duplicated().any():
-        # 分段下载或拼接年份文件时，边界时刻常会重复。若同一时刻 14 列取值一致，
-        # 保留第一条与既有 export_forcing.py 的处理一致；若值冲突则不能静默选择。
+        # 项目原 1000 流域 MSWEP 表在 2020 年末也存在同类冲突；训练期的
+        # export_forcing.py 用 keep='first'。零样本检查必须复用该规则，避免
+        # 新旧流域因重复记录采用不同输入口径。--duplicate-policy error 可用于
+        # 单独审计新文件，而不是用于本次与既有模型的可比推理。
         duplicated = df.index.duplicated(keep=False)
         duplicate_rows = df.loc[duplicated]
         conflict_times = []
@@ -88,14 +92,18 @@ def read_mswep(path: Path, basins: list[str]) -> pd.DataFrame:
             # NaN 也视为一种取值，避免“一个缺失、一个有值”被误判为一致。
             if (group.nunique(dropna=False) > 1).any():
                 conflict_times.append(timestamp)
-        if conflict_times:
+        if conflict_times and duplicate_policy == "error":
             examples = ", ".join(str(t) for t in conflict_times[:3])
             raise ValueError(
                 f"MSWEP 文件有 {len(conflict_times)} 个重复时间且降雨值冲突，"
                 f"例如 {examples}；请先确认拼接规则"
             )
         n_repeat = int(df.index.duplicated().sum())
-        print(f"警告：MSWEP 文件有 {n_repeat} 条重复时间记录，数值一致，保留第一条")
+        if conflict_times:
+            print(f"警告：MSWEP 文件有 {n_repeat} 条重复记录，其中 "
+                  f"{len(conflict_times)} 个时间的降雨值冲突；按原 86 流域规则保留第一条")
+        else:
+            print(f"警告：MSWEP 文件有 {n_repeat} 条重复时间记录，数值一致，保留第一条")
         df = df[~df.index.duplicated(keep="first")]
     if not isinstance(df.index, pd.DatetimeIndex):
         raise ValueError("MSWEP time 列无法解析为时间")
@@ -158,11 +166,14 @@ def physical_scale(raw_attrs: pd.DataFrame, blob: dict) -> tuple[np.ndarray, np.
 
 
 @torch.no_grad()
-def predict(model, forcing: np.ndarray, attrs: np.ndarray, seq_length: int,
+def predict(model, forcing: np.ndarray, attrs: np.ndarray, grid: pd.DatetimeIndex, seq_length: int,
             batch_size: int, device: str) -> tuple[np.ndarray, np.ndarray]:
     """仅在输入强迫完整的时刻生成归一化 Q 预测。"""
     n_basin, n_time, _ = forcing.shape
-    valid = np.isfinite(forcing).all(axis=(1, 2))
+    # CSV 缺一个时刻时，DataFrame 的行位置仍连续，但真实时间并不连续。该时刻
+    # 及任何跨越它的窗口都不能送入模型，否则会把 6 小时误当作一个 3 小时步长。
+    step_ok = np.r_[True, np.diff(grid.asi8) == pd.Timedelta(hours=3).value]
+    valid = np.isfinite(forcing).all(axis=(1, 2)) & step_ok[None, :]
     positions = []
     basin_idx = []
     for bi in range(n_basin):
@@ -170,7 +181,7 @@ def predict(model, forcing: np.ndarray, attrs: np.ndarray, seq_length: int,
         # 每个窗口都必须完整；cumsum 比逐窗口循环快得多
         bad = (~valid[bi]).astype(np.int32)
         count = np.concatenate(([0], np.cumsum(bad)))
-        keep = (count[candidates] - count[candidates - seq_length]) == 0
+        keep = ((count[candidates] - count[candidates - seq_length]) == 0) & valid[bi, candidates]
         positions.append(candidates[keep])
         basin_idx.append(np.full(int(keep.sum()), bi, dtype=np.int64))
     positions = np.concatenate(positions)
@@ -206,7 +217,7 @@ def main() -> None:
     if blob.get("config", {}).get("target_scaling") != "physical":
         raise ValueError("零样本流量推理必须使用 physical target scaling 的检查点")
 
-    mswep = read_mswep(args.mswep_csv, basins)
+    mswep = read_mswep(args.mswep_csv, basins, args.duplicate_policy)
     temp, solar, q_obs = read_camelsh(basins)
     grid = mswep.index.intersection(temp.index).intersection(solar.index).intersection(q_obs.index).sort_values()
     if args.start:
@@ -231,7 +242,7 @@ def main() -> None:
     model.load_state_dict(blob["state_dict"])
     model.eval()
     device = next(model.parameters()).device.type + (":0" if next(model.parameters()).device.type == "cuda" else "")
-    bi, pos, q_norm = predict(model, forcing, attrs, 480, args.batch_size, device)
+    bi, pos, q_norm = predict(model, forcing, attrs, grid, 480, args.batch_size, device)
     q_mean, q_std = physical_scale(raw_attrs, blob)
     q_hat = q_norm * q_std[bi] + q_mean[bi]
     observed = q_obs.reindex(grid, columns=basins).to_numpy("float32").T[bi, pos]
@@ -255,6 +266,7 @@ def main() -> None:
         "mswep_csv": str(args.mswep_csv.resolve()), "basins": basins,
         "time_start": str(grid.min()), "time_end": str(grid.max()),
         "seq_length": 480, "target_scaling": "physical",
+        "duplicate_policy": args.duplicate_policy,
         "note": "结果仅用于零样本接入检查，非重新训练后的正式外部验证。",
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(metrics.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
