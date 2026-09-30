@@ -14,6 +14,9 @@ for p in (ROOT / "src", ROOT, ROOT / "src" / "others"):
     if str(p) not in sys.path: sys.path.insert(0, str(p))
 
 CANDIDATES = ["01100561","01189000","02322800","02365769","02366996","02407000","03198000","05422600","06843500","06890900","06893620","06893890","07154500","07230500"]
+# 与 CANDIDATES 同顺序的一对一 STGQ 匹配对照；来自已完成的属性/气候匹配，
+# 直接内置，保证一键运行不依赖 results/summary 下的临时分析文件。
+MATCHED_CONTROLS = ["01073587","01109000","02231000","02374500","02479945","02466030","03193000","05473450","06844500","06913000","06893970","06914950","07140850","07242380"]
 EMBARGO = 480
 
 def args():
@@ -126,9 +129,8 @@ def main():
     q_on_grid=q.reindex(grid,columns=extra); h_on_grid=h.reindex(grid,columns=extra)
     for b in extra: splits[b]=candidate_split(grid,q_on_grid[b],h_on_grid[b])
     prep=ExternalPrepared(grid,forcing,attrs,targets,basins,splits)
-    control_file=ROOT/"results"/"summary"/"candidate_stgq_matched_controls.csv"
-    controls=pd.read_csv(control_file,dtype=str).query("control_rank == '1'").control_basin.tolist()
-    if len(controls)!=len(CANDIDATES) or len(set(controls))!=len(controls): raise ValueError("匹配 STGQ 对照不是 14 个唯一流域")
+    controls=MATCHED_CONTROLS
+    if len(controls)!=len(CANDIDATES) or len(set(controls))!=len(controls): raise ValueError("内置匹配 STGQ 对照不是 14 个唯一流域")
     a.out_dir.mkdir(parents=True,exist_ok=True); allm=[]; records=[]
     scenarios=[("complete",None,None,False), ("candidate_fixed",CANDIDATES,None,True), ("matched_stgq_fixed",controls,None,True)]
     for ratio in (.30,.50,.70):
