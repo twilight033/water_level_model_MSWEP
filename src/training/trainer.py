@@ -209,8 +209,14 @@ def _nse_by_basin(result: dict, task: str) -> np.ndarray:
 
 
 def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
-                basins: list = None, verbose: bool = True) -> dict:
-    """完整训练一次并在测试集上评估，返回结果字典。"""
+                hidden_valid: dict = None, basins: list = None,
+                verbose: bool = True) -> dict:
+    """完整训练一次并在测试集上评估，返回结果字典。
+
+    ``hidden`` 只作用于训练段；``hidden_valid`` 仅用于那些真实无 Q 的外部
+    流域实验，防止验证选模阶段读取本应不可得的径流标签。测试段永不屏蔽，
+    保留作最终盲评估。
+    """
     set_seed(cfg.model_seed)
     model = build_model(cfg.architecture, forcing_size=prepared.forcing.shape[-1],
                         attr_size=prepared.attrs.shape[-1],
@@ -227,7 +233,7 @@ def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
     ds_train = WindowDataset(prepared, "train", cfg.seq_length, cfg.window_step_train,
                              tasks=tasks, basins=basins, hidden=hidden, scaling=scaling)
     ds_valid = WindowDataset(prepared, "valid", cfg.seq_length, cfg.window_step_eval,
-                             tasks=tasks, basins=basins, scaling=scaling)
+                             tasks=tasks, basins=basins, hidden=hidden_valid, scaling=scaling)
     ds_test = WindowDataset(prepared, "test", cfg.seq_length, cfg.window_step_test,
                             tasks=tasks, basins=basins, scaling=scaling)
 
