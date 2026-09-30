@@ -108,9 +108,23 @@ def main():
     ix=base_grid.get_indexer(grid); base_f=base_forcing[:,ix,:]
     ext_f=np.stack([rain.reindex(grid,columns=extra).to_numpy("float32").T,temp.reindex(grid,columns=extra).to_numpy("float32").T,solar.reindex(grid,columns=extra).to_numpy("float32").T],axis=-1)
     basins=list(base_basins)+extra; forcing=np.concatenate([base_f,ext_f]); targets={"flow":np.concatenate([base_targets["flow"][:,ix],q.reindex(grid,columns=extra).to_numpy("float32").T]),"waterlevel":np.concatenate([base_targets["waterlevel"][:,ix],h.reindex(grid,columns=extra).to_numpy("float32").T])}
-    base_attr,_=get_attribute_table("extended",basins=base_basins); ext_attr,_=build_attribute_table("extended",extra); ext_attr=ext_attr.reindex(columns=base_attr.columns,fill_value=0.); attrs=pd.concat([base_attr,ext_attr]).reindex(basins)
+    if not np.isfinite(forcing).all():
+        raise ValueError(f"合并后的气象强迫含 {int((~np.isfinite(forcing)).sum())} 个缺失值，训练输入不允许缺失")
+    # 类别属性（地质/土地覆盖）必须在 99 个流域上统一编码；若把 13 个新增
+    # 流域单独 one-hot，会让同一类别的列号与原 86 流域不一致。
+    base_attr,_=get_attribute_table("extended",basins=base_basins)
+    all_attr,_=build_attribute_table("extended",basins)
+    all_attr=all_attr.reindex(columns=base_attr.columns,fill_value=0.)
+    cached_base=base_attr.reindex(columns=all_attr.columns)
+    rebuilt_base=all_attr.reindex(base_basins)
+    if not np.allclose(cached_base.to_numpy("float32"),rebuilt_base.to_numpy("float32"),equal_nan=True):
+        raise ValueError("99 流域属性重建后与原 86 流域缓存不一致，拒绝混用不同类别编码")
+    attrs=all_attr.reindex(basins)
     splits=dict(base_splits)
-    for b in extra: splits[b]=candidate_split(grid,q[b],h[b])
+    # Q/H 原始表是小时级，必须先对齐到模型使用的共同 3 小时时间轴；
+    # 否则小时级的位置会被错误地当作 3 小时时间轴索引。
+    q_on_grid=q.reindex(grid,columns=extra); h_on_grid=h.reindex(grid,columns=extra)
+    for b in extra: splits[b]=candidate_split(grid,q_on_grid[b],h_on_grid[b])
     prep=ExternalPrepared(grid,forcing,attrs,targets,basins,splits)
     control_file=ROOT/"results"/"summary"/"candidate_stgq_matched_controls.csv"
     controls=pd.read_csv(control_file,dtype=str).query("control_rank == '1'").control_basin.tolist()
