@@ -14,9 +14,6 @@ for p in (ROOT / "src", ROOT, ROOT / "src" / "others"):
     if str(p) not in sys.path: sys.path.insert(0, str(p))
 
 CANDIDATES = ["01100561","01189000","02322800","02365769","02366996","02407000","03198000","05422600","06843500","06890900","06893620","06893890","07154500","07230500"]
-# 与 CANDIDATES 同顺序的一对一 STGQ 匹配对照；来自已完成的属性/气候匹配，
-# 直接内置，保证一键运行不依赖 results/summary 下的临时分析文件。
-MATCHED_CONTROLS = ["01073587","01109000","02231000","02374500","02479945","02466030","03193000","05473450","06844500","06913000","06893970","06914950","07140850","07242380"]
 EMBARGO = 480
 
 def args():
@@ -64,6 +61,9 @@ class ExternalPrepared:
         from pipeline.dataset import TargetScaling
         self.grid, self.basins, self.splits = grid, basins, {"splits":splits}
         self.basin_index = {b:i for i,b in enumerate(basins)}; self.n_time=len(grid)
+        # 标记共同时间轴中的断点。WindowDataset 会丢弃跨越断点的样本，避免
+        # 例如 MSWEP 缺一个 3 小时时刻时把前后数据错误拼成连续 480 步输入。
+        self.time_valid = np.r_[True, np.diff(grid.asi8) == pd.Timedelta("3h").value]
         self.targets_raw, self.attrs_raw = targets_raw, attrs_raw
         self.stats = {"flow":{}, "waterlevel":{}, "forcing":{}, "attr":{}}
         for bi,b in enumerate(basins):
@@ -95,6 +95,30 @@ def fixed_mask(prep, basins, include_valid):
             if split=="valid" and not include_valid: continue
             lo,hi=prep.split_range(b,split); mask["flow"][bi,lo:hi+1]=np.isfinite(prep.targets_raw["flow"][bi,lo:hi+1])
     return tr,va
+
+def select_in_model_controls(attrs, base_basins):
+    """从原 86 流域中为每个候选选一个唯一的属性/气候相似对照。
+
+    外部 CAMELSH 全库中的最近邻未必在当前 99 流域数据集中，不能用于固定
+    留出。此处只在原 86 流域中匹配，保证对照既有相同气象强迫缓存，也真实
+    参与本次训练。候选 01100561 本身在原 86 中，因此从候选池中排除。
+    """
+    cols = ["area", "p_mean", "p_seasonality", "frac_snow", "aridity", "slope_mean"]
+    missing = [c for c in cols if c not in attrs.columns]
+    if missing:
+        raise ValueError(f"无法匹配原 86 流域对照，属性缺列: {missing}")
+    pool = [b for b in base_basins if b not in CANDIDATES]
+    data = attrs.loc[pool + CANDIDATES, cols].astype(float)
+    z = (data - data.mean()) / data.std(ddof=0).replace(0, 1.0)
+    chosen, used = [], set()
+    for candidate in CANDIDATES:
+        distance = ((z.loc[pool] - z.loc[candidate]) ** 2).sum(axis=1)
+        for basin in distance.sort_values().index:
+            if basin not in used:
+                chosen.append(basin); used.add(basin); break
+    if len(chosen) != len(CANDIDATES):
+        raise ValueError("原 86 流域中无法选出 14 个唯一匹配对照")
+    return chosen
 
 def main():
     a=args()
@@ -129,10 +153,9 @@ def main():
     q_on_grid=q.reindex(grid,columns=extra); h_on_grid=h.reindex(grid,columns=extra)
     for b in extra: splits[b]=candidate_split(grid,q_on_grid[b],h_on_grid[b])
     prep=ExternalPrepared(grid,forcing,attrs,targets,basins,splits)
-    controls=MATCHED_CONTROLS
-    if len(controls)!=len(CANDIDATES) or len(set(controls))!=len(controls): raise ValueError("内置匹配 STGQ 对照不是 14 个唯一流域")
+    controls=select_in_model_controls(attrs,base_basins)
     a.out_dir.mkdir(parents=True,exist_ok=True); allm=[]; records=[]
-    scenarios=[("complete",None,None,False), ("candidate_fixed",CANDIDATES,None,True), ("matched_stgq_fixed",controls,None,True)]
+    scenarios=[("complete",None,None,False), ("candidate_fixed",CANDIDATES,None,True), ("matched_86_fixed",controls,None,True)]
     for ratio in (.30,.50,.70):
         for xs in a.mask_seeds: scenarios.append((f"random_q_holdout{int(ratio*100)}",None,(ratio,xs),False))
     for name,fixed,random_spec,hide_valid in scenarios:

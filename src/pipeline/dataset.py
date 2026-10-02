@@ -217,6 +217,25 @@ class WindowDataset(Dataset):
                 continue
 
             cand = np.arange(start_pos, end_pos + 1, self.window_step, dtype=np.int64)
+            # 外部拼接数据可显式提供时间连续性标记。例如新增降雨序列少了
+            # 一个 3 小时时刻时，不能把断点两侧误当作相邻输入。原始缓存数据
+            # 没有该属性，因而保持既有行为不变。
+            time_valid = getattr(prepared, "time_valid", None)
+            if time_valid is not None:
+                time_valid = np.asarray(time_valid, dtype=bool)
+                if time_valid.shape != (prepared.n_time,):
+                    raise ValueError(
+                        "time_valid 的形状必须为 [n_time]，"
+                        f"收到 {time_valid.shape}，n_time={prepared.n_time}")
+                # target 本身须为连续段起点之后的正常时刻，且其前 L 个输入
+                # 时刻均不能跨越任一断点。前缀和避免对每个窗口逐一循环。
+                invalid_prefix = np.concatenate(
+                    ([0], np.cumsum((~time_valid).astype(np.int64))))
+                window_ok = (
+                    time_valid[cand]
+                    & ((invalid_prefix[cand] - invalid_prefix[cand - self.seq_length]) == 0)
+                )
+                cand = cand[window_ok]
             keep = np.zeros(cand.shape, dtype=bool)
             for task in self.tasks:
                 valid = ~np.isnan(self._targets[task][bi, cand])
