@@ -23,6 +23,7 @@ def args():
     p.add_argument("--model-seeds", nargs="+", type=int, default=[1], help="模型种子；试跑默认 1，正式建议 1 2 3")
     p.add_argument("--mask-seeds", nargs="+", type=int, default=[42], help="随机留出掩膜种子")
     p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--preflight", action="store_true", help="只校验99流域数据、掩膜和滑窗，不训练")
     return p.parse_args()
 
 def _frame(ds, var, basins):
@@ -61,6 +62,23 @@ class ExternalPrepared:
         from pipeline.dataset import TargetScaling
         self.grid, self.basins, self.splits = grid, basins, {"splits":splits}
         self.basin_index = {b:i for i,b in enumerate(basins)}; self.n_time=len(grid)
+        expected_targets = (len(basins), self.n_time)
+        expected_forcing = (len(basins), self.n_time)
+        if forcing_raw.ndim != 3 or forcing_raw.shape[:2] != expected_forcing:
+            raise ValueError(
+                "99流域强迫拼接失败：期望前两维为 "
+                f"{expected_forcing}，实际为 {forcing_raw.shape}")
+        if list(attrs_raw.index.astype(str)) != [str(b) for b in basins]:
+            raise ValueError("99流域属性表的行顺序与流域列表不一致")
+        for task in ("flow", "waterlevel"):
+            if task not in targets_raw or targets_raw[task].shape != expected_targets:
+                actual = None if task not in targets_raw else targets_raw[task].shape
+                raise ValueError(
+                    f"99流域{task}目标拼接失败：期望 {expected_targets}，实际 {actual}")
+        if set(splits) != set(basins):
+            missing = sorted(set(basins) - set(splits))
+            extra = sorted(set(splits) - set(basins))
+            raise ValueError(f"划分流域与数据流域不一致：缺少={missing[:5]}，多出={extra[:5]}")
         # 标记共同时间轴中的断点。WindowDataset 会丢弃跨越断点的样本，避免
         # 例如 MSWEP 缺一个 3 小时时刻时把前后数据错误拼成连续 480 步输入。
         self.time_valid = np.r_[True, np.diff(grid.asi8) == pd.Timedelta("3h").value]
@@ -120,6 +138,26 @@ def select_in_model_controls(attrs, base_basins):
         raise ValueError("原 86 流域中无法选出 14 个唯一匹配对照")
     return chosen
 
+def preflight(prep, controls):
+    """不训练地验证最易出错的数据维度、尺度拟合与固定留出滑窗。"""
+    from pipeline.dataset import WindowDataset
+    from training.trainer import gauged_basins
+    cases = [
+        ("完整监督", None, None),
+        ("候选流域固定留出", *fixed_mask(prep, CANDIDATES, True)),
+        ("原86匹配对照固定留出", *fixed_mask(prep, controls, True)),
+    ]
+    for label, hidden, hidden_valid in cases:
+        fit_basins = gauged_basins(prep, hidden)
+        scaling = prep.make_scaling("physical", fit_basins)
+        counts = []
+        for split, mask in (("train", hidden), ("valid", hidden_valid), ("test", None)):
+            ds = WindowDataset(prep, split, 480, 8 if split != "test" else 1,
+                               tasks=("flow", "waterlevel"), hidden=mask,
+                               scaling=scaling)
+            counts.append(f"{split}={len(ds)}")
+        print(f"预检通过：{label}；物理尺度拟合流域={len(fit_basins)}；" + "，".join(counts))
+
 def main():
     a=args()
     from pipeline.loaders import load_forcing, load_targets
@@ -134,7 +172,14 @@ def main():
     grid=base_grid.intersection(rain.index).intersection(temp.index).intersection(solar.index).intersection(q.index).intersection(h.index).sort_values()
     ix=base_grid.get_indexer(grid); base_f=base_forcing[:,ix,:]
     ext_f=np.stack([rain.reindex(grid,columns=extra).to_numpy("float32").T,temp.reindex(grid,columns=extra).to_numpy("float32").T,solar.reindex(grid,columns=extra).to_numpy("float32").T],axis=-1)
-    basins=list(base_basins)+extra; forcing=np.concatenate([base_f,ext_f]); targets={"flow":np.concatenate([base_targets["flow"][:,ix],q.reindex(grid,columns=extra).to_numpy("float32").T]),"waterlevel":np.concatenate([base_targets["waterlevel"][:,ix],h.reindex(grid,columns=extra).to_numpy("float32").T])}
+    basins=list(base_basins)+extra
+    forcing=np.ascontiguousarray(np.vstack([base_f,ext_f]), dtype="float32")
+    targets={
+        "flow": np.ascontiguousarray(np.vstack([
+            base_targets["flow"][:,ix], q.reindex(grid,columns=extra).to_numpy("float32").T]), dtype="float32"),
+        "waterlevel": np.ascontiguousarray(np.vstack([
+            base_targets["waterlevel"][:,ix], h.reindex(grid,columns=extra).to_numpy("float32").T]), dtype="float32"),
+    }
     if not np.isfinite(forcing).all():
         raise ValueError(f"合并后的气象强迫含 {int((~np.isfinite(forcing)).sum())} 个缺失值，训练输入不允许缺失")
     # 类别属性（地质/土地覆盖）必须在 99 个流域上统一编码；若把 13 个新增
@@ -154,6 +199,11 @@ def main():
     for b in extra: splits[b]=candidate_split(grid,q_on_grid[b],h_on_grid[b])
     prep=ExternalPrepared(grid,forcing,attrs,targets,basins,splits)
     controls=select_in_model_controls(attrs,base_basins)
+    print(f"99流域数据已组装：forcing={prep.forcing.shape}，Q={prep.targets_raw['flow'].shape}，H={prep.targets_raw['waterlevel'].shape}")
+    if a.preflight:
+        preflight(prep, controls)
+        print("预检完成：未启动训练。")
+        return
     a.out_dir.mkdir(parents=True,exist_ok=True); allm=[]; records=[]
     scenarios=[("complete",None,None,False), ("candidate_fixed",CANDIDATES,None,True), ("matched_86_fixed",controls,None,True)]
     for ratio in (.30,.50,.70):
