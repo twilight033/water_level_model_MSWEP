@@ -114,6 +114,47 @@ def fixed_mask(prep, basins, include_valid):
             lo,hi=prep.split_range(b,split); mask["flow"][bi,lo:hi+1]=np.isfinite(prep.targets_raw["flow"][bi,lo:hi+1])
     return tr,va
 
+def random_basin_holdout(prep, ratio, mask_seed):
+    """在99流域本地构造随机整流域 Q 留出掩膜。
+
+    不能复用原86流域实验的掩膜数组；该数组若仍是 86 行，会在第87个
+    流域索引时报错。随机数规则与 pipeline.masking.basin_holdout 保持一致。
+    """
+    from pipeline.masking import _subseed
+    rng = np.random.default_rng(_subseed(mask_seed, "holdout_flow", "all"))
+    n_hold = int(round(len(prep.basins) * ratio))
+    chosen = sorted(rng.choice(len(prep.basins), size=n_hold, replace=False).tolist())
+    held = [prep.basins[i] for i in chosen]
+    mask = np.zeros((len(prep.basins), len(prep.grid)), dtype=bool)
+    rows = []
+    for basin in prep.basins:
+        bi = prep.basin_index[basin]
+        lo, hi = prep.split_range(basin, "train")
+        valid = np.isfinite(prep.targets_raw["flow"][bi, lo:hi + 1])
+        if basin in held:
+            mask[bi, lo:hi + 1] = valid
+        rows.append({"task":"flow", "basin":basin, "mechanism":"basin_holdout",
+                     "target_ratio":ratio, "n_valid_train":int(valid.sum()),
+                     "n_hidden":int(valid.sum()) if basin in held else 0,
+                     "realized_ratio":1.0 if basin in held else 0.0,
+                     "held_out":basin in held, "n_segments":0, "n_trimmed_steps":0})
+    stats = {"meta":{"mechanism":"basin_holdout", "mask_seed":mask_seed,
+                     "ratios":{"flow":ratio}, "scope":"仅训练段；验证与测试保持原始完整"},
+             "per_task":{"flow":{"target_ratio":ratio, "n_basins_held_out":n_hold,
+                                  "n_basins_total":len(prep.basins),
+                                  "realized_basin_ratio":n_hold / len(prep.basins),
+                                  "held_out_basins":held}},
+             "per_basin":rows}
+    return {"flow":mask}, stats, held
+
+def assert_mask_shape(mask, prep, label):
+    if mask is None:
+        return
+    expected = (len(prep.basins), len(prep.grid))
+    for task, values in mask.items():
+        if values.shape != expected:
+            raise ValueError(f"{label} 的 {task} 掩膜形状错误：期望 {expected}，实际 {values.shape}")
+
 def select_in_model_controls(attrs, base_basins):
     """从原 86 流域中为每个候选选一个唯一的属性/气候相似对照。
 
@@ -142,12 +183,16 @@ def preflight(prep, controls):
     """不训练地验证最易出错的数据维度、尺度拟合与固定留出滑窗。"""
     from pipeline.dataset import WindowDataset
     from training.trainer import gauged_basins
+    random_hidden, _, _ = random_basin_holdout(prep, .30, 42)
     cases = [
         ("完整监督", None, None),
         ("候选流域固定留出", *fixed_mask(prep, CANDIDATES, True)),
         ("原86匹配对照固定留出", *fixed_mask(prep, controls, True)),
+        ("随机30%流域留出", random_hidden, None),
     ]
     for label, hidden, hidden_valid in cases:
+        assert_mask_shape(hidden, prep, "预检训练")
+        assert_mask_shape(hidden_valid, prep, "预检验证")
         fit_basins = gauged_basins(prep, hidden)
         scaling = prep.make_scaling("physical", fit_basins)
         counts = []
@@ -165,7 +210,6 @@ def main():
     from pipeline.attribute_sources import get_attribute_table, build_attribute_table
     from training.trainer import TrainConfig, train_model
     from evaluation.metrics import evaluate_run, aggregate
-    from pipeline.masking import get_hidden
     base_grid, base_forcing, base_basins=load_forcing(); base_targets=load_targets(base_grid,base_basins); base_splits=load_splits()["splits"]
     extra=[b for b in CANDIDATES if b not in base_basins]
     rain,temp,solar,q,h=extra_data(extra,a.mswep_csv)
@@ -225,11 +269,17 @@ def main():
                     print(f"跳过已完成运行: {key}"); allm.append(pd.read_csv(out/"metrics.csv",dtype={"basin":str})); records.append({"run_key":key,"scenario":name,"architecture":arch,"seed":seed,"status":"skipped"}); continue
                 run_prep=make_prepared()
                 if random_spec:
-                    hidden,mask_stats=get_hidden(run_prep,{"flow":random_spec[0]},mechanism="basin_holdout",mask_seed=random_spec[1]); hidden_valid=None
+                    hidden,mask_stats,held=random_basin_holdout(run_prep,random_spec[0],random_spec[1]); hidden_valid=None
+                    fit_basins=[b for b in run_prep.basins if b not in held]
                 elif fixed:
                     hidden,hidden_valid=fixed_mask(run_prep,fixed,hide_valid); mask_stats={"fixed_basins":fixed,"scope":"训练与验证 Q 屏蔽，H 保留"}
-                else: hidden=hidden_valid=None; mask_stats=None
-                result=train_model(run_prep,cfg,hidden=hidden,hidden_valid=hidden_valid,verbose=True)
+                    fit_basins=[b for b in run_prep.basins if b not in fixed]
+                else:
+                    hidden=hidden_valid=None; mask_stats=None; fit_basins=list(run_prep.basins)
+                assert_mask_shape(hidden, run_prep, "训练")
+                assert_mask_shape(hidden_valid, run_prep, "验证")
+                print(f"开始运行: {key}；Q={run_prep.targets_raw['flow'].shape}；物理尺度拟合流域={len(fit_basins)}")
+                result=train_model(run_prep,cfg,hidden=hidden,hidden_valid=hidden_valid,fit_basins=fit_basins,verbose=True)
                 m,_=evaluate_run(run_prep,result["test_prediction"],result["tasks"],scaling=result["scaling"]); m.insert(0,"scenario",name); m.insert(1,"architecture",arch); m["model_seed"]=seed; m["candidate"]=m.basin.isin(CANDIDATES); m["matched_control"]=m.basin.isin(controls)
                 m.to_csv(out/"metrics.csv",index=False,encoding="utf-8-sig"); aggregate(m).to_csv(out/"aggregate.csv",index=False,encoding="utf-8-sig"); torch.save({"state_dict":result["state_dict"],"model_config":result["model_config"],"config":result["config"]},out/"model.pt")
                 (out/"run.json").write_text(json.dumps({"scenario":name,"architecture":arch,"seed":seed,"mask":mask_stats,"best_epoch":result["best_epoch"],"best_val_score":result["best_val_score"],"scaling_info":result["scaling_info"]},ensure_ascii=False,indent=2),encoding="utf-8")

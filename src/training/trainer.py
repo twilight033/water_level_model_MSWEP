@@ -219,6 +219,7 @@ def _nse_by_basin(result: dict, task: str) -> np.ndarray:
 
 def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
                 hidden_valid: dict = None, basins: list = None,
+                fit_basins: list = None,
                 verbose: bool = True) -> dict:
     """完整训练一次并在测试集上评估，返回结果字典。
 
@@ -236,7 +237,8 @@ def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
     # 目标尺度：physical 模式下只用仍有径流标签的流域拟合，留出流域零径流观测
     scaling = prepared.make_scaling(
         cfg.target_scaling,
-        fit_basins=gauged_basins(prepared, hidden) if cfg.target_scaling == "physical" else None,
+        fit_basins=(fit_basins if fit_basins is not None else gauged_basins(prepared, hidden))
+        if cfg.target_scaling == "physical" else None,
     )
 
     ds_train = WindowDataset(prepared, "train", cfg.seq_length, cfg.window_step_train,
