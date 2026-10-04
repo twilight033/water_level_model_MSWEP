@@ -74,8 +74,17 @@ def gauged_basins(prepared, hidden: dict = None, task: str = "flow") -> list:
     物理尺度回归只能用这些流域拟合——留出流域一个观测都不能参与，否则又把
     径流信息漏回去了。
     """
+    target = prepared.targets_raw[task]
+    expected = len(prepared.basins)
+    if target.ndim != 2 or target.shape[0] != expected:
+        raise RuntimeError(
+            f"训练前目标维度不一致：{task}={target.shape}，"
+            f"prepared.basins={expected}。请勿混用86流域缓存与99流域对象。")
+
     out = []
-    for basin in prepared.splits["splits"]:
+    # 只以本次 PreparedData 实际携带的流域为准；不能遍历可能残留外部
+    # 流域条目的 split 文件，否则会让索引与目标数组的行数脱节。
+    for basin in prepared.basins:
         bi = prepared.basin_index[basin]
         lo, hi = prepared.split_range(basin, "train")
         if hi < lo:

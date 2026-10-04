@@ -197,7 +197,14 @@ def main():
     # 否则小时级的位置会被错误地当作 3 小时时间轴索引。
     q_on_grid=q.reindex(grid,columns=extra); h_on_grid=h.reindex(grid,columns=extra)
     for b in extra: splits[b]=candidate_split(grid,q_on_grid[b],h_on_grid[b])
-    prep=ExternalPrepared(grid,forcing,attrs,targets,basins,splits)
+    # 每次训练均重建该对象，禁止 75 次连续运行共享可变的 targets / scaling
+    # 状态。targets 的 copy 使某一运行即使意外原地修改数组，也不会污染下一次。
+    def make_prepared():
+        return ExternalPrepared(
+            grid, forcing, attrs,
+            {task: values.copy() for task, values in targets.items()}, basins, splits)
+
+    prep=make_prepared()
     controls=select_in_model_controls(attrs,base_basins)
     print(f"99流域数据已组装：forcing={prep.forcing.shape}，Q={prep.targets_raw['flow'].shape}，H={prep.targets_raw['waterlevel'].shape}")
     if a.preflight:
@@ -209,11 +216,6 @@ def main():
     for ratio in (.30,.50,.70):
         for xs in a.mask_seeds: scenarios.append((f"random_q_holdout{int(ratio*100)}",None,(ratio,xs),False))
     for name,fixed,random_spec,hide_valid in scenarios:
-        if random_spec:
-            hidden,mask_stats=get_hidden(prep,{"flow":random_spec[0]},mechanism="basin_holdout",mask_seed=random_spec[1]); hidden_valid=None
-        elif fixed:
-            hidden,hidden_valid=fixed_mask(prep,fixed,hide_valid); mask_stats={"fixed_basins":fixed,"scope":"训练与验证 Q 屏蔽，H 保留"}
-        else: hidden=hidden_valid=None; mask_stats=None
         arches=("single_flow","dual_head") if name!="complete" else ("single_flow","single_waterlevel","dual_head")
         for arch in arches:
             for seed in a.model_seeds:
@@ -221,8 +223,14 @@ def main():
                 key=f"{name}_{arch}_ms{seed}"+(f"_xs{random_spec[1]}" if random_spec else ""); out=a.out_dir/key; out.mkdir(exist_ok=True)
                 if (out/"run.json").exists() and (out/"metrics.csv").exists():
                     print(f"跳过已完成运行: {key}"); allm.append(pd.read_csv(out/"metrics.csv",dtype={"basin":str})); records.append({"run_key":key,"scenario":name,"architecture":arch,"seed":seed,"status":"skipped"}); continue
-                result=train_model(prep,cfg,hidden=hidden,hidden_valid=hidden_valid,verbose=True)
-                m,_=evaluate_run(prep,result["test_prediction"],result["tasks"],scaling=result["scaling"]); m.insert(0,"scenario",name); m.insert(1,"architecture",arch); m["model_seed"]=seed; m["candidate"]=m.basin.isin(CANDIDATES); m["matched_control"]=m.basin.isin(controls)
+                run_prep=make_prepared()
+                if random_spec:
+                    hidden,mask_stats=get_hidden(run_prep,{"flow":random_spec[0]},mechanism="basin_holdout",mask_seed=random_spec[1]); hidden_valid=None
+                elif fixed:
+                    hidden,hidden_valid=fixed_mask(run_prep,fixed,hide_valid); mask_stats={"fixed_basins":fixed,"scope":"训练与验证 Q 屏蔽，H 保留"}
+                else: hidden=hidden_valid=None; mask_stats=None
+                result=train_model(run_prep,cfg,hidden=hidden,hidden_valid=hidden_valid,verbose=True)
+                m,_=evaluate_run(run_prep,result["test_prediction"],result["tasks"],scaling=result["scaling"]); m.insert(0,"scenario",name); m.insert(1,"architecture",arch); m["model_seed"]=seed; m["candidate"]=m.basin.isin(CANDIDATES); m["matched_control"]=m.basin.isin(controls)
                 m.to_csv(out/"metrics.csv",index=False,encoding="utf-8-sig"); aggregate(m).to_csv(out/"aggregate.csv",index=False,encoding="utf-8-sig"); torch.save({"state_dict":result["state_dict"],"model_config":result["model_config"],"config":result["config"]},out/"model.pt")
                 (out/"run.json").write_text(json.dumps({"scenario":name,"architecture":arch,"seed":seed,"mask":mask_stats,"best_epoch":result["best_epoch"],"best_val_score":result["best_val_score"],"scaling_info":result["scaling_info"]},ensure_ascii=False,indent=2),encoding="utf-8")
                 allm.append(m); records.append({"run_key":key,"scenario":name,"architecture":arch,"seed":seed,"best_val_score":result["best_val_score"]})
