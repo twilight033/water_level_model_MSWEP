@@ -22,6 +22,8 @@ def args():
     p.add_argument("--out-dir", type=Path, default=ROOT / "results" / "nonrating14_external_seed1")
     p.add_argument("--model-seeds", nargs="+", type=int, default=[1], help="模型种子；试跑默认 1，正式建议 1 2 3")
     p.add_argument("--mask-seeds", nargs="+", type=int, default=[42], help="随机留出掩膜种子")
+    p.add_argument("--target-scaling", choices=("physical", "observed"), default="physical",
+                   help="Q 归一化；observed 使用留出流域真实训练期 Q 尺度，仅作上限诊断")
     p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     p.add_argument("--preflight", action="store_true", help="只校验99流域数据、掩膜和滑窗，不训练")
     return p.parse_args()
@@ -179,7 +181,7 @@ def select_in_model_controls(attrs, base_basins):
         raise ValueError("原 86 流域中无法选出 14 个唯一匹配对照")
     return chosen
 
-def preflight(prep, controls):
+def preflight(prep, controls, target_scaling):
     """不训练地验证最易出错的数据维度、尺度拟合与固定留出滑窗。"""
     from pipeline.dataset import WindowDataset
     from training.trainer import gauged_basins
@@ -194,14 +196,14 @@ def preflight(prep, controls):
         assert_mask_shape(hidden, prep, "预检训练")
         assert_mask_shape(hidden_valid, prep, "预检验证")
         fit_basins = gauged_basins(prep, hidden)
-        scaling = prep.make_scaling("physical", fit_basins)
+        scaling = prep.make_scaling(target_scaling, fit_basins)
         counts = []
         for split, mask in (("train", hidden), ("valid", hidden_valid), ("test", None)):
             ds = WindowDataset(prep, split, 480, 8 if split != "test" else 1,
                                tasks=("flow", "waterlevel"), hidden=mask,
                                scaling=scaling)
             counts.append(f"{split}={len(ds)}")
-        print(f"预检通过：{label}；物理尺度拟合流域={len(fit_basins)}；" + "，".join(counts))
+        print(f"预检通过：{label}；{target_scaling}尺度拟合流域={len(fit_basins)}；" + "，".join(counts))
 
 def main():
     a=args()
@@ -252,7 +254,7 @@ def main():
     controls=select_in_model_controls(attrs,base_basins)
     print(f"99流域数据已组装：forcing={prep.forcing.shape}，Q={prep.targets_raw['flow'].shape}，H={prep.targets_raw['waterlevel'].shape}")
     if a.preflight:
-        preflight(prep, controls)
+        preflight(prep, controls, a.target_scaling)
         print("预检完成：未启动训练。")
         return
     a.out_dir.mkdir(parents=True,exist_ok=True); allm=[]; records=[]
@@ -263,7 +265,7 @@ def main():
         arches=("single_flow","dual_head") if name!="complete" else ("single_flow","single_waterlevel","dual_head")
         for arch in arches:
             for seed in a.model_seeds:
-                cfg=TrainConfig(architecture=arch,seq_length=480,attr_set="extended",target_scaling="physical",model_seed=seed,device=a.device)
+                cfg=TrainConfig(architecture=arch,seq_length=480,attr_set="extended",target_scaling=a.target_scaling,model_seed=seed,device=a.device)
                 key=f"{name}_{arch}_ms{seed}"+(f"_xs{random_spec[1]}" if random_spec else ""); out=a.out_dir/key; out.mkdir(exist_ok=True)
                 if (out/"run.json").exists() and (out/"metrics.csv").exists():
                     print(f"跳过已完成运行: {key}"); allm.append(pd.read_csv(out/"metrics.csv",dtype={"basin":str})); records.append({"run_key":key,"scenario":name,"architecture":arch,"seed":seed,"status":"skipped"}); continue
@@ -285,6 +287,6 @@ def main():
                 (out/"run.json").write_text(json.dumps({"scenario":name,"architecture":arch,"seed":seed,"mask":mask_stats,"best_epoch":result["best_epoch"],"best_val_score":result["best_val_score"],"scaling_info":result["scaling_info"]},ensure_ascii=False,indent=2),encoding="utf-8")
                 allm.append(m); records.append({"run_key":key,"scenario":name,"architecture":arch,"seed":seed,"best_val_score":result["best_val_score"]})
     pd.concat(allm).to_csv(a.out_dir/"metrics_all.csv",index=False,encoding="utf-8-sig"); pd.DataFrame(records).to_csv(a.out_dir/"runs.csv",index=False,encoding="utf-8-sig")
-    (a.out_dir/"experiment.json").write_text(json.dumps({"n_basins":len(basins),"new_basins":extra,"candidate_basins":CANDIDATES,"matched_controls":controls,"mswep_csv":str(a.mswep_csv),"model_seeds":a.model_seeds,"mask_seeds":a.mask_seeds,"target_scaling":"physical"},ensure_ascii=False,indent=2),encoding="utf-8")
+    (a.out_dir/"experiment.json").write_text(json.dumps({"n_basins":len(basins),"new_basins":extra,"candidate_basins":CANDIDATES,"matched_controls":controls,"mswep_csv":str(a.mswep_csv),"model_seeds":a.model_seeds,"mask_seeds":a.mask_seeds,"target_scaling":a.target_scaling},ensure_ascii=False,indent=2),encoding="utf-8")
     print(f"完成：{a.out_dir}")
 if __name__=="__main__": main()
