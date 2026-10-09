@@ -15,6 +15,7 @@ for p in (ROOT / "src", ROOT, ROOT / "src" / "others"):
 
 CANDIDATES = ["01100561","01189000","02322800","02365769","02366996","02407000","03198000","05422600","06843500","06890900","06893620","06893890","07154500","07230500"]
 EMBARGO = 480
+HOLDOUT_PROTOCOL = "train_valid_q_hidden_v2"
 
 def args():
     p = argparse.ArgumentParser(description="99 流域：候选流域 Q 屏蔽、H 保留的外部训练")
@@ -26,6 +27,7 @@ def args():
                    help="Q 归一化；observed 使用留出流域真实训练期 Q 尺度，仅作上限诊断")
     p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     p.add_argument("--preflight", action="store_true", help="只校验99流域数据、掩膜和滑窗，不训练")
+    p.add_argument("--random-only", action="store_true", help="只重跑随机30/50/70%%留出，不重复完整监督和固定留出")
     return p.parse_args()
 
 def _frame(ds, var, basins):
@@ -141,7 +143,8 @@ def random_basin_holdout(prep, ratio, mask_seed):
                      "realized_ratio":1.0 if basin in held else 0.0,
                      "held_out":basin in held, "n_segments":0, "n_trimmed_steps":0})
     stats = {"meta":{"mechanism":"basin_holdout", "mask_seed":mask_seed,
-                     "ratios":{"flow":ratio}, "scope":"仅训练段；验证与测试保持原始完整"},
+                     "ratios":{"flow":ratio}, "scope":"训练与验证 Q 屏蔽，H 保留；测试 Q 仅用于最终评估",
+                     "protocol":HOLDOUT_PROTOCOL},
              "per_task":{"flow":{"target_ratio":ratio, "n_basins_held_out":n_hold,
                                   "n_basins_total":len(prep.basins),
                                   "realized_basin_ratio":n_hold / len(prep.basins),
@@ -181,17 +184,20 @@ def select_in_model_controls(attrs, base_basins):
         raise ValueError("原 86 流域中无法选出 14 个唯一匹配对照")
     return chosen
 
-def preflight(prep, controls, target_scaling):
+def preflight(prep, controls, target_scaling, mask_seeds=(42,)):
     """不训练地验证最易出错的数据维度、尺度拟合与固定留出滑窗。"""
     from pipeline.dataset import WindowDataset
     from training.trainer import gauged_basins
-    random_hidden, _, _ = random_basin_holdout(prep, .30, 42)
     cases = [
         ("完整监督", None, None),
         ("候选流域固定留出", *fixed_mask(prep, CANDIDATES, True)),
         ("原86匹配对照固定留出", *fixed_mask(prep, controls, True)),
-        ("随机30%流域留出", random_hidden, None),
     ]
+    for ratio in (.30, .50, .70):
+        for seed in mask_seeds:
+            random_hidden, _, held = random_basin_holdout(prep, ratio, seed)
+            _, random_valid = fixed_mask(prep, held, True)
+            cases.append((f"随机{int(ratio*100)}%流域留出 xs{seed}", random_hidden, random_valid))
     for label, hidden, hidden_valid in cases:
         assert_mask_shape(hidden, prep, "预检训练")
         assert_mask_shape(hidden_valid, prep, "预检验证")
@@ -254,13 +260,15 @@ def main():
     controls=select_in_model_controls(attrs,base_basins)
     print(f"99流域数据已组装：forcing={prep.forcing.shape}，Q={prep.targets_raw['flow'].shape}，H={prep.targets_raw['waterlevel'].shape}")
     if a.preflight:
-        preflight(prep, controls, a.target_scaling)
+        preflight(prep, controls, a.target_scaling, a.mask_seeds)
         print("预检完成：未启动训练。")
         return
     a.out_dir.mkdir(parents=True,exist_ok=True); allm=[]; records=[]
     scenarios=[("complete",None,None,False), ("candidate_fixed",CANDIDATES,None,True), ("matched_86_fixed",controls,None,True)]
+    if a.random_only:
+        scenarios=[]
     for ratio in (.30,.50,.70):
-        for xs in a.mask_seeds: scenarios.append((f"random_q_holdout{int(ratio*100)}",None,(ratio,xs),False))
+        for xs in a.mask_seeds: scenarios.append((f"random_q_holdout{int(ratio*100)}",None,(ratio,xs),True))
     for name,fixed,random_spec,hide_valid in scenarios:
         arches=("single_flow","dual_head") if name!="complete" else ("single_flow","single_waterlevel","dual_head")
         for arch in arches:
@@ -268,10 +276,16 @@ def main():
                 cfg=TrainConfig(architecture=arch,seq_length=480,attr_set="extended",target_scaling=a.target_scaling,model_seed=seed,device=a.device)
                 key=f"{name}_{arch}_ms{seed}"+(f"_xs{random_spec[1]}" if random_spec else ""); out=a.out_dir/key; out.mkdir(exist_ok=True)
                 if (out/"run.json").exists() and (out/"metrics.csv").exists():
+                    if random_spec:
+                        previous=json.loads((out/"run.json").read_text(encoding="utf-8"))
+                        if previous.get("mask", {}).get("meta", {}).get("protocol") != HOLDOUT_PROTOCOL:
+                            raise ValueError(f"{out} 是旧留出协议，不能跳过或混入新结果。请使用新的输出目录。")
                     print(f"跳过已完成运行: {key}"); allm.append(pd.read_csv(out/"metrics.csv",dtype={"basin":str})); records.append({"run_key":key,"scenario":name,"architecture":arch,"seed":seed,"status":"skipped"}); continue
                 run_prep=make_prepared()
                 if random_spec:
-                    hidden,mask_stats,held=random_basin_holdout(run_prep,random_spec[0],random_spec[1]); hidden_valid=None
+                    hidden,mask_stats,held=random_basin_holdout(run_prep,random_spec[0],random_spec[1])
+                    # 使用同一批留出流域屏蔽验证Q，禁止其参与最佳模型选择。
+                    _,hidden_valid=fixed_mask(run_prep,held,True)
                     fit_basins=[b for b in run_prep.basins if b not in held]
                 elif fixed:
                     hidden,hidden_valid=fixed_mask(run_prep,fixed,hide_valid); mask_stats={"fixed_basins":fixed,"scope":"训练与验证 Q 屏蔽，H 保留"}
@@ -284,9 +298,9 @@ def main():
                 result=train_model(run_prep,cfg,hidden=hidden,hidden_valid=hidden_valid,fit_basins=fit_basins,verbose=True)
                 m,_=evaluate_run(run_prep,result["test_prediction"],result["tasks"],scaling=result["scaling"]); m.insert(0,"scenario",name); m.insert(1,"architecture",arch); m["model_seed"]=seed; m["candidate"]=m.basin.isin(CANDIDATES); m["matched_control"]=m.basin.isin(controls)
                 m.to_csv(out/"metrics.csv",index=False,encoding="utf-8-sig"); aggregate(m).to_csv(out/"aggregate.csv",index=False,encoding="utf-8-sig"); torch.save({"state_dict":result["state_dict"],"model_config":result["model_config"],"config":result["config"]},out/"model.pt")
-                (out/"run.json").write_text(json.dumps({"scenario":name,"architecture":arch,"seed":seed,"mask":mask_stats,"best_epoch":result["best_epoch"],"best_val_score":result["best_val_score"],"scaling_info":result["scaling_info"]},ensure_ascii=False,indent=2),encoding="utf-8")
+                (out/"run.json").write_text(json.dumps({"scenario":name,"architecture":arch,"seed":seed,"mask":mask_stats,"best_epoch":result["best_epoch"],"best_val_score":result["best_val_score"],"scaling_info":result["scaling_info"],"train_label_counts":result["train_label_counts"],"valid_label_counts":result["valid_label_counts"],"test_label_counts":result["test_label_counts"]},ensure_ascii=False,indent=2),encoding="utf-8")
                 allm.append(m); records.append({"run_key":key,"scenario":name,"architecture":arch,"seed":seed,"best_val_score":result["best_val_score"]})
     pd.concat(allm).to_csv(a.out_dir/"metrics_all.csv",index=False,encoding="utf-8-sig"); pd.DataFrame(records).to_csv(a.out_dir/"runs.csv",index=False,encoding="utf-8-sig")
-    (a.out_dir/"experiment.json").write_text(json.dumps({"n_basins":len(basins),"new_basins":extra,"candidate_basins":CANDIDATES,"matched_controls":controls,"mswep_csv":str(a.mswep_csv),"model_seeds":a.model_seeds,"mask_seeds":a.mask_seeds,"target_scaling":a.target_scaling},ensure_ascii=False,indent=2),encoding="utf-8")
+    (a.out_dir/"experiment.json").write_text(json.dumps({"n_basins":len(basins),"new_basins":extra,"candidate_basins":CANDIDATES,"matched_controls":controls,"mswep_csv":str(a.mswep_csv),"model_seeds":a.model_seeds,"mask_seeds":a.mask_seeds,"target_scaling":a.target_scaling,"random_holdout_protocol":HOLDOUT_PROTOCOL,"random_only":a.random_only},ensure_ascii=False,indent=2),encoding="utf-8")
     print(f"完成：{a.out_dir}")
 if __name__=="__main__": main()
