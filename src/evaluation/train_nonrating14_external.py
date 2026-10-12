@@ -16,6 +16,7 @@ for p in (ROOT / "src", ROOT, ROOT / "src" / "others"):
 CANDIDATES = ["01100561","01189000","02322800","02365769","02366996","02407000","03198000","05422600","06843500","06890900","06893620","06893890","07154500","07230500"]
 EMBARGO = 480
 HOLDOUT_PROTOCOL = "train_valid_q_hidden_v2"
+PREPROCESSING_PROTOCOL = "original86_rules_onehot_identity_v3"
 
 def args():
     p = argparse.ArgumentParser(description="99 流域：候选流域 Q 屏蔽、H 保留的外部训练")
@@ -28,6 +29,7 @@ def args():
     p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     p.add_argument("--preflight", action="store_true", help="只校验99流域数据、掩膜和滑窗，不训练")
     p.add_argument("--random-only", action="store_true", help="只重跑随机30/50/70%%留出，不重复完整监督和固定留出")
+    p.add_argument("--rating-baselines", action="store_true", help="独立拟合分段和幂律率定函数，仅使用非留出流域训练数据")
     return p.parse_args()
 
 def _frame(ds, var, basins):
@@ -62,7 +64,7 @@ def candidate_split(grid, q, h):
     return {"train_start":str(grid[start]),"train_end":str(grid[m1-1]),"valid_start":str(grid[m1+EMBARGO]),"valid_end":str(grid[m2-1]),"test_start":str(grid[m2+EMBARGO]),"test_end":str(grid[z]),"ref_start":str(grid[a]),"ref_end":str(grid[z]),"ref_span_steps":span,"short_test":bool(z-(m2+EMBARGO)+1 < 2920)}
 
 class ExternalPrepared:
-    def __init__(self, grid, forcing_raw, attrs_raw, targets_raw, basins, splits):
+    def __init__(self, grid, forcing_raw, attrs_raw, targets_raw, basins, splits, onehot_cols=None):
         from pipeline.dataset import TargetScaling
         self.grid, self.basins, self.splits = grid, basins, {"splits":splits}
         self.basin_index = {b:i for i,b in enumerate(basins)}; self.n_time=len(grid)
@@ -91,15 +93,31 @@ class ExternalPrepared:
         for bi,b in enumerate(basins):
             lo,hi=self.split_range(b,"train")
             for task in ("flow","waterlevel"):
-                v=targets_raw[task][bi,lo:hi+1]; v=v[np.isfinite(v)]
-                self.stats[task][b]={"mean":float(v.mean()) if len(v) else 0.,"std":float(max(v.std(),1e-6)) if len(v) else 1.,"n":len(v)}
-        chunks=[]
+                v=targets_raw[task][bi,lo:hi+1]; v=v[np.isfinite(v)].astype("float64")
+                s=float(v.std()) if len(v) else 0.
+                self.stats[task][b]={"mean":float(v.mean()) if len(v) else 0.,"std":s if s>1e-6 else 1.,"n":len(v)}
+        # 与原86的compute_norm_stats一致：float64累积训练段强迫统计。
+        total_n=0; total_sum=np.zeros(forcing_raw.shape[-1],dtype="float64"); total_sq=total_sum.copy()
         for bi,b in enumerate(basins):
-            lo,hi=self.split_range(b,"train"); chunks.append(forcing_raw[bi,lo:hi+1])
-        allf=np.concatenate(chunks,axis=0); fm=allf.mean(0); fs=np.maximum(allf.std(0),1e-6)
-        self.forcing=((forcing_raw-fm)/fs).astype("float32")
-        am=attrs_raw.to_numpy("float32").mean(0); ast=np.maximum(attrs_raw.to_numpy("float32").std(0),1e-6)
+            lo,hi=self.split_range(b,"train"); chunk=forcing_raw[bi,lo:hi+1].astype("float64")
+            total_n+=len(chunk); total_sum+=chunk.sum(0); total_sq+=(chunk**2).sum(0)
+        if not total_n: raise ValueError("没有训练期气象样本")
+        fm=total_sum/total_n; fs=np.maximum(np.sqrt(np.maximum(total_sq/total_n-fm**2,0.)),1e-6)
+        self.forcing=((forcing_raw-fm.astype("float32"))/fs.astype("float32")).astype("float32")
+        self.onehot_cols=set(onehot_cols if onehot_cols is not None else [c for c in attrs_raw.columns if "__" in c])
+        am=[]; ast=[]
+        for col in attrs_raw.columns:
+            values=attrs_raw[col].to_numpy("float32").astype("float64")
+            if col in self.onehot_cols:
+                if not np.isin(values,[0.,1.]).all(): raise ValueError(f"one-hot列不是0/1: {col}")
+                mean,std=0.,1.
+            else:
+                mean=float(values.mean()); s=float(values.std()); std=s if s>1e-6 else 1.
+            am.append(mean); ast.append(std)
+            self.stats["attr"][col]={"mean":mean,"std":std,"onehot":col in self.onehot_cols}
+        am=np.asarray(am,dtype="float32"); ast=np.asarray(ast,dtype="float32")
         self.attrs=((attrs_raw.to_numpy("float32")-am)/ast).astype("float32")
+        self.preprocessing_info={"protocol":PREPROCESSING_PROTOCOL,"onehot_columns":sorted(self.onehot_cols),"n_forcing_steps_pooled":total_n}
         self.stats["forcing"]={str(i):{"mean":float(fm[i]),"std":float(fs[i])} for i in range(len(fm))}
         self.default_scaling=TargetScaling(self,"observed"); self.targets=self.default_scaling.normalized
     def split_range(self, basin, split):
@@ -213,6 +231,8 @@ def preflight(prep, controls, target_scaling, mask_seeds=(42,)):
 
 def main():
     a=args()
+    if a.rating_baselines and a.random_only:
+        raise ValueError("两种率定对照需要完整单任务H检查点，不能同时使用--random-only")
     from pipeline.loaders import load_forcing, load_targets
     from pipeline.splits import load_splits
     from pipeline.attribute_sources import get_attribute_table, build_attribute_table
@@ -237,7 +257,7 @@ def main():
     # 类别属性（地质/土地覆盖）必须在 99 个流域上统一编码；若把 13 个新增
     # 流域单独 one-hot，会让同一类别的列号与原 86 流域不一致。
     base_attr,_=get_attribute_table("extended",basins=base_basins)
-    all_attr,_=build_attribute_table("extended",basins)
+    all_attr,onehot_cols=build_attribute_table("extended",basins)
     all_attr=all_attr.reindex(columns=base_attr.columns,fill_value=0.)
     cached_base=base_attr.reindex(columns=all_attr.columns)
     rebuilt_base=all_attr.reindex(base_basins)
@@ -254,7 +274,8 @@ def main():
     def make_prepared():
         return ExternalPrepared(
             grid, forcing, attrs,
-            {task: values.copy() for task, values in targets.items()}, basins, splits)
+            {task: values.copy() for task, values in targets.items()}, basins, splits,
+            onehot_cols=[c for c in onehot_cols if c in attrs.columns])
 
     prep=make_prepared()
     controls=select_in_model_controls(attrs,base_basins)
@@ -264,6 +285,7 @@ def main():
         print("预检完成：未启动训练。")
         return
     a.out_dir.mkdir(parents=True,exist_ok=True); allm=[]; records=[]
+    water_cache={}
     scenarios=[("complete",None,None,False), ("candidate_fixed",CANDIDATES,None,True), ("matched_86_fixed",controls,None,True)]
     if a.random_only:
         scenarios=[]
@@ -276,10 +298,17 @@ def main():
                 cfg=TrainConfig(architecture=arch,seq_length=480,attr_set="extended",target_scaling=a.target_scaling,model_seed=seed,device=a.device)
                 key=f"{name}_{arch}_ms{seed}"+(f"_xs{random_spec[1]}" if random_spec else ""); out=a.out_dir/key; out.mkdir(exist_ok=True)
                 if (out/"run.json").exists() and (out/"metrics.csv").exists():
+                    previous=json.loads((out/"run.json").read_text(encoding="utf-8"))
+                    if previous.get("preprocessing",{}).get("protocol") != PREPROCESSING_PROTOCOL:
+                        raise ValueError(f"{out} 的预处理不是恢复后的原86规则，请使用新目录重跑")
                     if random_spec:
                         previous=json.loads((out/"run.json").read_text(encoding="utf-8"))
                         if previous.get("mask", {}).get("meta", {}).get("protocol") != HOLDOUT_PROTOCOL:
                             raise ValueError(f"{out} 是旧留出协议，不能跳过或混入新结果。请使用新的输出目录。")
+                    if a.rating_baselines and arch=="dual_head":
+                        from evaluation.regional_rating_functions import run_baselines
+                        fit_ids=[b for b in prep.basins if b not in (fixed or (previous.get("mask") or {}).get("per_task",{}).get("flow",{}).get("held_out_basins",[]))]
+                        run_baselines(prep,cfg,a.out_dir,out,fit_ids,water_cache)
                     print(f"跳过已完成运行: {key}"); allm.append(pd.read_csv(out/"metrics.csv",dtype={"basin":str})); records.append({"run_key":key,"scenario":name,"architecture":arch,"seed":seed,"status":"skipped"}); continue
                 run_prep=make_prepared()
                 if random_spec:
@@ -298,9 +327,18 @@ def main():
                 result=train_model(run_prep,cfg,hidden=hidden,hidden_valid=hidden_valid,fit_basins=fit_basins,verbose=True)
                 m,_=evaluate_run(run_prep,result["test_prediction"],result["tasks"],scaling=result["scaling"]); m.insert(0,"scenario",name); m.insert(1,"architecture",arch); m["model_seed"]=seed; m["candidate"]=m.basin.isin(CANDIDATES); m["matched_control"]=m.basin.isin(controls)
                 m.to_csv(out/"metrics.csv",index=False,encoding="utf-8-sig"); aggregate(m).to_csv(out/"aggregate.csv",index=False,encoding="utf-8-sig"); torch.save({"state_dict":result["state_dict"],"model_config":result["model_config"],"config":result["config"]},out/"model.pt")
-                (out/"run.json").write_text(json.dumps({"scenario":name,"architecture":arch,"seed":seed,"mask":mask_stats,"best_epoch":result["best_epoch"],"best_val_score":result["best_val_score"],"scaling_info":result["scaling_info"],"train_label_counts":result["train_label_counts"],"valid_label_counts":result["valid_label_counts"],"test_label_counts":result["test_label_counts"]},ensure_ascii=False,indent=2),encoding="utf-8")
+                (out/"run.json").write_text(json.dumps({"scenario":name,"architecture":arch,"seed":seed,"mask":mask_stats,"preprocessing":run_prep.preprocessing_info,"best_epoch":result["best_epoch"],"best_val_score":result["best_val_score"],"scaling_info":result["scaling_info"],"train_label_counts":result["train_label_counts"],"valid_label_counts":result["valid_label_counts"],"test_label_counts":result["test_label_counts"]},ensure_ascii=False,indent=2),encoding="utf-8")
+                if a.rating_baselines and arch=="dual_head":
+                    from evaluation.regional_rating_functions import run_baselines
+                    run_baselines(run_prep,cfg,a.out_dir,out,fit_basins,water_cache)
                 allm.append(m); records.append({"run_key":key,"scenario":name,"architecture":arch,"seed":seed,"best_val_score":result["best_val_score"]})
     pd.concat(allm).to_csv(a.out_dir/"metrics_all.csv",index=False,encoding="utf-8-sig"); pd.DataFrame(records).to_csv(a.out_dir/"runs.csv",index=False,encoding="utf-8-sig")
-    (a.out_dir/"experiment.json").write_text(json.dumps({"n_basins":len(basins),"new_basins":extra,"candidate_basins":CANDIDATES,"matched_controls":controls,"mswep_csv":str(a.mswep_csv),"model_seeds":a.model_seeds,"mask_seeds":a.mask_seeds,"target_scaling":a.target_scaling,"random_holdout_protocol":HOLDOUT_PROTOCOL,"random_only":a.random_only},ensure_ascii=False,indent=2),encoding="utf-8")
+    (a.out_dir/"experiment.json").write_text(json.dumps({"n_basins":len(basins),"new_basins":extra,"candidate_basins":CANDIDATES,"matched_controls":controls,"mswep_csv":str(a.mswep_csv),"model_seeds":a.model_seeds,"mask_seeds":a.mask_seeds,"target_scaling":a.target_scaling,"preprocessing":prep.preprocessing_info,"rating_baselines":a.rating_baselines,"random_holdout_protocol":HOLDOUT_PROTOCOL,"random_only":a.random_only},ensure_ascii=False,indent=2),encoding="utf-8")
+    if a.rating_baselines:
+        rating_files=sorted(a.out_dir.glob("*/rating_baselines/*/metrics.csv"))
+        if not rating_files:
+            raise RuntimeError("要求率定对照但未生成任何率定结果")
+        pd.concat([pd.read_csv(p,dtype={"basin":str}) for p in rating_files],ignore_index=True).to_csv(
+            a.out_dir/"rating_metrics_all.csv",index=False,encoding="utf-8-sig")
     print(f"完成：{a.out_dir}")
 if __name__=="__main__": main()
