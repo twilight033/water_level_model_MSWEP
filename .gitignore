@@ -48,3 +48,7 @@ outputs/
 # Codex 工具产生的临时脚本，非项目代码
 .codex_artifacts/
 .codex_tmp/
+dist/
+docs/
+reports/
+research_notes/

@@ -1,0 +1,6 @@
+# 直接读取缓存，不需要hydrodataset、F盘或原始MSWEP文件。
+numpy>=1.23,<2
+pandas>=1.5
+pyarrow>=12
+scipy>=1.10
+torch>=2.1

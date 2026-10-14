@@ -1,0 +1,19 @@
+{
+  "geometry_mode": "snapshot",
+  "attribute_set": "base",
+  "ratios": [0.3, 0.5, 0.7],
+  "model_seeds": [1, 2, 3],
+  "mask_seeds": [42, 123, 456],
+  "sequence_length": 168,
+  "hidden_size": 64,
+  "lstm_epochs": 30,
+  "train_stride": 8,
+  "valid_stride": 8,
+  "test_stride": 1,
+  "batch_size": 512,
+  "converter_widths": [4, 8, 16],
+  "converter_epochs": 50,
+  "converter_max_pairs_per_basin": 4096,
+  "sham_controls": true,
+  "observed_h_diagnostic": true
+}
