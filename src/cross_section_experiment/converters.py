@@ -148,11 +148,14 @@ def fit_network(train: PairData, hidden: int, epochs: int, seed: int, device: st
 
 def fit_regional_converter(prepared, retained: list[str], static: np.ndarray | None,
                            widths: list[int], epochs: int, seed: int, device: str,
-                           max_pairs: int = 4096, forced_width: int | None = None):
-    """内部整站验证后在全部保留站重拟合，外部留出站Q不参与任何步骤。"""
+                           max_pairs: int = 4096, forced_width: int | None = None,
+                           target_scaling: str = "physical"):
+    """配对标签仅来自保留站；observed对照额外允许各站训练Q统计量。"""
+    if target_scaling not in ("physical", "observed"):
+        raise ValueError("转换器Q归一化只能是physical或observed")
     inner_train, inner_valid = internal_basin_split(retained, seed + 1000)
-    # 内部伪无Q站的Q统计也不用于候选模型的尺度构建。
-    inner_scale = prepared.make_scaling("physical", fit_basins=inner_train)
+    # physical不读取内部伪无Q站尺度；observed明确作为已知Q尺度对照。
+    inner_scale = prepared.make_scaling(target_scaling, fit_basins=inner_train)
     train = collect_pairs(prepared, inner_train, "train", inner_scale, static, max_pairs)
     valid = collect_pairs(prepared, inner_valid, "valid", inner_scale, static, max_pairs)
     candidates = []
@@ -160,7 +163,7 @@ def fit_regional_converter(prepared, retained: list[str], static: np.ndarray | N
         _, info = fit_network(train, int(width), epochs, seed, device, valid)
         candidates.append({"width": int(width), **info})
     chosen = max(candidates, key=lambda v: v["best_score"])
-    scale = prepared.make_scaling("physical", fit_basins=retained)
+    scale = prepared.make_scaling(target_scaling, fit_basins=retained)
     final_train = collect_pairs(prepared, retained, "train", scale, static, max_pairs)
     model, final_info = fit_network(final_train, chosen["width"], chosen["best_epoch"],
                                     seed, device)
@@ -168,7 +171,11 @@ def fit_regional_converter(prepared, retained: list[str], static: np.ndarray | N
         "input_dim": final_train.x.shape[1], "hidden": chosen["width"],
         "n_parameters": model.n_parameters(), "epochs_refit": chosen["best_epoch"],
         "inner_train_basins": inner_train, "inner_validation_basins": inner_valid,
-        "scale_fit_basins": retained, "n_train_pairs": len(final_train.y),
+        "target_scaling": target_scaling,
+        "scale_fit_basins": retained if target_scaling == "physical" else [],
+        "observed_q_scale_basins": list(prepared.basins) if target_scaling == "observed" else [],
+        "heldout_q_statistics_used_for_scaling": target_scaling == "observed",
+        "training_q_pair_basins": retained, "n_train_pairs": len(final_train.y),
         "n_inner_train_pairs": len(train.y), "n_inner_validation_pairs": len(valid.y),
         "selected_by": "retained_basins_internal_whole_basin_validation",
         "training_h_source": "observed_training_h",

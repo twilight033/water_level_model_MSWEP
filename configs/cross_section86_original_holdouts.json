@@ -1,0 +1,985 @@
+{
+  "description": "从原4J/4K单Q与双头历史运行记录冻结的原86留出名单",
+  "basins": [
+    "01017000",
+    "01017290",
+    "01017960",
+    "01018000",
+    "01018009",
+    "01021200",
+    "01027200",
+    "01029200",
+    "01029500",
+    "01030500",
+    "01031300",
+    "01031450",
+    "01031500",
+    "01031510",
+    "01037380",
+    "01044550",
+    "01046000",
+    "01047150",
+    "01048220",
+    "01052500",
+    "01054300",
+    "01055000",
+    "01059000",
+    "01060000",
+    "01064801",
+    "01067950",
+    "01068910",
+    "01069500",
+    "01069700",
+    "01072800",
+    "01073000",
+    "01073319",
+    "01073500",
+    "010735562",
+    "01073587",
+    "01073785",
+    "01074520",
+    "01075000",
+    "01076000",
+    "01076500",
+    "01077400",
+    "01078000",
+    "01081500",
+    "01082000",
+    "01085000",
+    "01085500",
+    "01086000",
+    "01089100",
+    "01089500",
+    "01091000",
+    "01091500",
+    "01092000",
+    "01093852",
+    "01094000",
+    "01096000",
+    "01096500",
+    "010965852",
+    "01097000",
+    "01097300",
+    "01098530",
+    "01099500",
+    "01100000",
+    "01100505",
+    "01100561",
+    "01101000",
+    "01103280",
+    "01108000",
+    "01108410",
+    "01109000",
+    "01109060",
+    "01109070",
+    "01109403",
+    "01109730",
+    "01110000",
+    "01111212",
+    "01111300",
+    "01111500",
+    "01115630",
+    "01115770",
+    "01117370",
+    "01117800",
+    "01118300",
+    "01119500",
+    "01121000",
+    "01122500",
+    "01123000"
+  ],
+  "n_original_runs_verified": 108,
+  "scenarios": {
+    "q30_mask42": {
+      "ratio": 0.3,
+      "mask_seed": 42,
+      "heldout": [
+        "01017000",
+        "01017960",
+        "01027200",
+        "01029200",
+        "01031450",
+        "01031500",
+        "01031510",
+        "01037380",
+        "01046000",
+        "01047150",
+        "01048220",
+        "01067950",
+        "01068910",
+        "01072800",
+        "010735562",
+        "01076000",
+        "01086000",
+        "01091500",
+        "01097300",
+        "01101000",
+        "01108410",
+        "01109070",
+        "01111212",
+        "01111300",
+        "01119500",
+        "01122500"
+      ],
+      "source_runs": [
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_single_flow_ms1_xs42_L480_extended/run.json",
+          "sha256": "542e1f7e24ed36277a181577bfbf08ced196b194f26dad3e39033b23ccff326d"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_dual_head_ms1_xs42_L480_extended/run.json",
+          "sha256": "6aa6b61c0a6c9cc0638a3fed992a20258b9844107dbdeabe9dba1dcca0e6a872"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_single_flow_ms2_xs42_L480_extended/run.json",
+          "sha256": "11534ec9abf246063b2523e8ce349b0abbb1f03d6cc552810cf990840d2803b8"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_dual_head_ms2_xs42_L480_extended/run.json",
+          "sha256": "ddcedcca3a7da131e18d7173375528861b0b27b4a31eb3ad24f599e947766470"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_single_flow_ms3_xs42_L480_extended/run.json",
+          "sha256": "0053e29a7e4c1e594a8904234f97b6a1cb4651bc8317fd958f9b65c2629ea7b3"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_dual_head_ms3_xs42_L480_extended/run.json",
+          "sha256": "01063fbef4d92fbf574d3be6616cc075fd14921128a8b32e3670a4ee78380e73"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_single_flow_ms1_xs42_L480_physical_extended/run.json",
+          "sha256": "ab04203b3bb3e0536991c9554bc8b1a23d061e2ed7408cc34240de8dddc403a0"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_dual_head_ms1_xs42_L480_physical_extended/run.json",
+          "sha256": "944c5f2c9216b723fcc75da00158ebba9cdf4da378f2a1fb5dfed2cf9c85605f"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_single_flow_ms2_xs42_L480_physical_extended/run.json",
+          "sha256": "0a5daf70504940e6c8732dab104cdbd13e4e73e9d4071c396a855c8dc1d53f9a"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_dual_head_ms2_xs42_L480_physical_extended/run.json",
+          "sha256": "1a88ccf7107d3ec68f4b4d9c34acf88b466611b6e884ecd3d03517fb0e49c645"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_single_flow_ms3_xs42_L480_physical_extended/run.json",
+          "sha256": "35826f3d37455b2911ffbb97e1f7ce0500bc9ba7d5a96c2b09e76e890b9afa53"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_dual_head_ms3_xs42_L480_physical_extended/run.json",
+          "sha256": "04bcf899b849a39d1ba6ed890a5a18385a94b6fe072b3e7b842773209fab186c"
+        }
+      ]
+    },
+    "q30_mask123": {
+      "ratio": 0.3,
+      "mask_seed": 123,
+      "heldout": [
+        "01017960",
+        "01018009",
+        "01029500",
+        "01031510",
+        "01037380",
+        "01047150",
+        "01052500",
+        "01059000",
+        "01069700",
+        "01072800",
+        "01073500",
+        "010735562",
+        "01073587",
+        "01076000",
+        "01081500",
+        "01085500",
+        "01086000",
+        "01089500",
+        "010965852",
+        "01098530",
+        "01100561",
+        "01108410",
+        "01109000",
+        "01109060",
+        "01111300",
+        "01118300"
+      ],
+      "source_runs": [
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_single_flow_ms1_xs123_L480_extended/run.json",
+          "sha256": "fcd35d350c05f6a6358f3ff7ca5c1b16322b113815292bf99fe6d049ba7e0bd3"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_dual_head_ms1_xs123_L480_extended/run.json",
+          "sha256": "def4e9ad800fc2e28d8addd5cb2f6ab0050ede762571ae5a83789a051528af22"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_single_flow_ms2_xs123_L480_extended/run.json",
+          "sha256": "e52d4b936f21f34987e26f463c8ccb28ed45e21aa16807f2692c3c48ad62d4a7"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_dual_head_ms2_xs123_L480_extended/run.json",
+          "sha256": "62f6b21c56931279344597ee3c03053b87720803953007300826877e0d496a08"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_single_flow_ms3_xs123_L480_extended/run.json",
+          "sha256": "a9a99a4ca2a231d6db084103b85c0b6b47036dc1f29bc2f8dd91d55d6364442c"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_dual_head_ms3_xs123_L480_extended/run.json",
+          "sha256": "39141d4cd92fbfd70352425e3143411dff1ec7c41cd612becb15c418b41f2853"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_single_flow_ms1_xs123_L480_physical_extended/run.json",
+          "sha256": "70f595c5c23e343be67dec9281f3feb2c528605b739047d3e3b8c1fde04a2f1a"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_dual_head_ms1_xs123_L480_physical_extended/run.json",
+          "sha256": "2ab16bf0f9b1ab8c3313c741d8be7ddad3236e9e17fbf2ca4dd218dcfa412a34"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_single_flow_ms2_xs123_L480_physical_extended/run.json",
+          "sha256": "1f5017ed7611002fa82ffbd5f82503d894e86640f8353969fb33d13330d6a15a"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_dual_head_ms2_xs123_L480_physical_extended/run.json",
+          "sha256": "0e4512e9452f296c50e7bf6ef3acc6838c1e2cb82363d006aa45545a137e6fca"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_single_flow_ms3_xs123_L480_physical_extended/run.json",
+          "sha256": "5332913fbff37c75b0be42db44fa21c7eec213a591d130f3bde46a8f2d7ef4e7"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_dual_head_ms3_xs123_L480_physical_extended/run.json",
+          "sha256": "e12055dc6047014429b4fa364714a41d7d430663c7f76d95bb9f2836a10f8a93"
+        }
+      ]
+    },
+    "q30_mask456": {
+      "ratio": 0.3,
+      "mask_seed": 456,
+      "heldout": [
+        "01017000",
+        "01017290",
+        "01018000",
+        "01029200",
+        "01030500",
+        "01047150",
+        "01060000",
+        "01072800",
+        "01073500",
+        "01074520",
+        "01076500",
+        "01077400",
+        "01078000",
+        "01085000",
+        "01086000",
+        "01091000",
+        "01094000",
+        "01096000",
+        "01096500",
+        "010965852",
+        "01097000",
+        "01098530",
+        "01099500",
+        "01110000",
+        "01115630",
+        "01115770"
+      ],
+      "source_runs": [
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_single_flow_ms1_xs456_L480_extended/run.json",
+          "sha256": "7d6e61273d8b4bd2af509febb85ba6aa2d7cb6bcd88811df53d0eed0b8ec0d4d"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_dual_head_ms1_xs456_L480_extended/run.json",
+          "sha256": "8e12c232ecb5c608536c4f09e05e89938166cb76382c18e3e0995a0c84eba232"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_single_flow_ms2_xs456_L480_extended/run.json",
+          "sha256": "ced85b296cecebbe7f569226db71d01cd2f83ee9d85b443e6157cb444a968e06"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_dual_head_ms2_xs456_L480_extended/run.json",
+          "sha256": "3692f9785d2cf4f14c23ca347f2b9e88983e2ae385eb1094d4a4cef395a6a63d"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_single_flow_ms3_xs456_L480_extended/run.json",
+          "sha256": "3fc8b4027387f348bb778de1a8111d31c274b51c5e13a9a3bcd887c34ad1c481"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout30_dual_head_ms3_xs456_L480_extended/run.json",
+          "sha256": "48e799aeb36e6dcf6d63ec30c67e49b954df5945b2ca00c898bbb2cf2d0b10b5"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_single_flow_ms1_xs456_L480_physical_extended/run.json",
+          "sha256": "844d23c2fc4e06eadbb20f1635a70730de76e3b73685d1eafc9f02b8f2575f1e"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_dual_head_ms1_xs456_L480_physical_extended/run.json",
+          "sha256": "0a5aa7b003cb14679ee7266f6373c91cc179b458b0a4b48c6212d0521b9f6a84"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_single_flow_ms2_xs456_L480_physical_extended/run.json",
+          "sha256": "74f85b5c211be3bbaac7df3e49508565a05a5bd38dc4c41c5e3bd7b53ffa3c35"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_dual_head_ms2_xs456_L480_physical_extended/run.json",
+          "sha256": "5809b193d856c42d3eeb50ac457254e498613b879c6fe9f37cbe1390208360ee"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_single_flow_ms3_xs456_L480_physical_extended/run.json",
+          "sha256": "fb6491c081a16e3232b59a72f561db3abdd641f2a7986533a7ea18599954e482"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout30_dual_head_ms3_xs456_L480_physical_extended/run.json",
+          "sha256": "5daeb1af783f3fb70118e815cc749a89ce25a441c78812643f22e16f9f6ca4c8"
+        }
+      ]
+    },
+    "q50_mask42": {
+      "ratio": 0.5,
+      "mask_seed": 42,
+      "heldout": [
+        "01017000",
+        "01017960",
+        "01018000",
+        "01018009",
+        "01021200",
+        "01027200",
+        "01029500",
+        "01030500",
+        "01031300",
+        "01031450",
+        "01031500",
+        "01031510",
+        "01037380",
+        "01047150",
+        "01054300",
+        "01060000",
+        "01064801",
+        "01069700",
+        "01073000",
+        "01074520",
+        "01075000",
+        "01081500",
+        "01091500",
+        "01092000",
+        "01094000",
+        "01096000",
+        "01097300",
+        "01098530",
+        "01099500",
+        "01100000",
+        "01100505",
+        "01103280",
+        "01108410",
+        "01109000",
+        "01109060",
+        "01110000",
+        "01111300",
+        "01115630",
+        "01115770",
+        "01117370",
+        "01118300",
+        "01119500",
+        "01122500"
+      ],
+      "source_runs": [
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_single_flow_ms1_xs42_L480_extended/run.json",
+          "sha256": "34aa680f7cb9f616ecd6c12d6c66f4bdb16b6d56a7b91f71f980759a9711039b"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_dual_head_ms1_xs42_L480_extended/run.json",
+          "sha256": "b3c64f51848c67e8ed0439cad1ec93ea7e156b325d354f721776ef7237819d0b"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_single_flow_ms2_xs42_L480_extended/run.json",
+          "sha256": "d188c9a884b887925ab8f1eaafed89d35d0a4baf7bac9d85dae446c7ee4ed677"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_dual_head_ms2_xs42_L480_extended/run.json",
+          "sha256": "7dc26068b603423b720d658b6802f7ee89b78736e39b20611489908b3fcbeed9"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_single_flow_ms3_xs42_L480_extended/run.json",
+          "sha256": "1bb347301b2bab0f9cce36b96d00661620a939718ebcde813511351c322bf565"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_dual_head_ms3_xs42_L480_extended/run.json",
+          "sha256": "beecd7cc66439d128a4d8e27f733e0bb6707ffda3e72b9716ca8cbf8c8d269ef"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_single_flow_ms1_xs42_L480_physical_extended/run.json",
+          "sha256": "29f35adf7630440e176adc57a50a27ccf877e8aad441a90f93dbec52110c4c0a"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_dual_head_ms1_xs42_L480_physical_extended/run.json",
+          "sha256": "3b2ff7c0ba7a64730e1a1309f342b188641149ac7e6503b51cbf6f5b344897ac"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_single_flow_ms2_xs42_L480_physical_extended/run.json",
+          "sha256": "680b8678bbe0edce29bd6c7984514384a7bf2d0bd42308cdd9be03feef2e4734"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_dual_head_ms2_xs42_L480_physical_extended/run.json",
+          "sha256": "cc96d989008a998d04763aa69985e545f61612afdbabcdb9539fa1ae41b9f1b0"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_single_flow_ms3_xs42_L480_physical_extended/run.json",
+          "sha256": "0a8d701ad02790d348e3db946afb7f7c2b00544f876b584e6d478ec4a3149f12"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_dual_head_ms3_xs42_L480_physical_extended/run.json",
+          "sha256": "3bbec1e64b5a52c8321682f7d962d71aea38e0527417f4c45664f66464566b37"
+        }
+      ]
+    },
+    "q50_mask123": {
+      "ratio": 0.5,
+      "mask_seed": 123,
+      "heldout": [
+        "01017290",
+        "01018000",
+        "01018009",
+        "01027200",
+        "01031300",
+        "01031450",
+        "01031510",
+        "01044550",
+        "01046000",
+        "01048220",
+        "01054300",
+        "01059000",
+        "01064801",
+        "01068910",
+        "01069500",
+        "01073000",
+        "01073319",
+        "01073587",
+        "01074520",
+        "01076000",
+        "01077400",
+        "01082000",
+        "01085000",
+        "01085500",
+        "01086000",
+        "01089100",
+        "01091000",
+        "01091500",
+        "01092000",
+        "01094000",
+        "01096500",
+        "010965852",
+        "01097000",
+        "01098530",
+        "01099500",
+        "01100000",
+        "01103280",
+        "01108000",
+        "01108410",
+        "01109060",
+        "01110000",
+        "01111500",
+        "01115630"
+      ],
+      "source_runs": [
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_single_flow_ms1_xs123_L480_extended/run.json",
+          "sha256": "469c3ebfe9f0f24358319de3edf8efae2f7ffd69c7b83e29d87b08bd234cc784"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_dual_head_ms1_xs123_L480_extended/run.json",
+          "sha256": "d90ff0920b7cddb8af6278673db245032a9582d52db6939a565a74d2881c8f2b"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_single_flow_ms2_xs123_L480_extended/run.json",
+          "sha256": "1f2c3e6444534f9a366f0b21057628e8be177c39df01da0c26be8b42690ad288"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_dual_head_ms2_xs123_L480_extended/run.json",
+          "sha256": "94af6ae11bc88d3aebf8547a892ac0e319e30ab34e6eec60c4088b4af15644d8"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_single_flow_ms3_xs123_L480_extended/run.json",
+          "sha256": "ecbd1f98c2707f1b5cc19530629967cb4a3624c60522cf75306483ca63eac226"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_dual_head_ms3_xs123_L480_extended/run.json",
+          "sha256": "e9bc1cddfc09f5a05ef6d0948cb9521f984558b0a56d1e8e27fe3704c5515ad2"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_single_flow_ms1_xs123_L480_physical_extended/run.json",
+          "sha256": "5c387ef0c824139e19fab7fcf5ab0bee3ea87fddfcfa47c5350b04bab849bf10"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_dual_head_ms1_xs123_L480_physical_extended/run.json",
+          "sha256": "4b4fdae2af06dcb93a5ba3266ad1d52e19087a2e0c58fba4f8fe4cfbde50855d"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_single_flow_ms2_xs123_L480_physical_extended/run.json",
+          "sha256": "adc7d8e8ce37340f65473baea0f9475a25ca9977a0e5799f0a3301d9b56fa0ba"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_dual_head_ms2_xs123_L480_physical_extended/run.json",
+          "sha256": "87be393f7948c6b5514b82cf1e270dab37b918e077cc30bbf813bd18f0ccfd74"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_single_flow_ms3_xs123_L480_physical_extended/run.json",
+          "sha256": "aa03d3aec85f79201c39f9a6e04b32883470c7c112e35a608e66e1e50bc885bd"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_dual_head_ms3_xs123_L480_physical_extended/run.json",
+          "sha256": "be94b45b1167afe0a797728eb68f5308080cad204832b4b6b7e35980b82e7165"
+        }
+      ]
+    },
+    "q50_mask456": {
+      "ratio": 0.5,
+      "mask_seed": 456,
+      "heldout": [
+        "01017000",
+        "01017290",
+        "01017960",
+        "01021200",
+        "01027200",
+        "01029200",
+        "01031300",
+        "01031510",
+        "01044550",
+        "01047150",
+        "01055000",
+        "01060000",
+        "01067950",
+        "01068910",
+        "01072800",
+        "01073500",
+        "010735562",
+        "01073785",
+        "01075000",
+        "01076500",
+        "01078000",
+        "01081500",
+        "01085000",
+        "01085500",
+        "01086000",
+        "01089500",
+        "01094000",
+        "01096000",
+        "010965852",
+        "01097300",
+        "01100561",
+        "01108000",
+        "01109060",
+        "01109070",
+        "01109730",
+        "01111212",
+        "01111300",
+        "01111500",
+        "01115770",
+        "01117800",
+        "01118300",
+        "01121000",
+        "01123000"
+      ],
+      "source_runs": [
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_single_flow_ms1_xs456_L480_extended/run.json",
+          "sha256": "877774afc176b3d363fac797fd3a4106333e2a19693a24e5e2cdbb7153d66b5a"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_dual_head_ms1_xs456_L480_extended/run.json",
+          "sha256": "03972476b41680a144b6f8eb48b219f313415b0f7dcaa029c12fa03cd6c78f91"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_single_flow_ms2_xs456_L480_extended/run.json",
+          "sha256": "a89d02caf9a060a0531d4bf4e665b7367c64c755dc15917515bc101c9758354b"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_dual_head_ms2_xs456_L480_extended/run.json",
+          "sha256": "3378e5295561c0f72d2d74142c98169feeb149bd93046ae4782129fad829f493"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_single_flow_ms3_xs456_L480_extended/run.json",
+          "sha256": "27a58eba4cab534ad1612da334017b23ccee4239cb7ae708dad7f5ec3a48230a"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout50_dual_head_ms3_xs456_L480_extended/run.json",
+          "sha256": "593af301cae9a0b6e8a569eead649bb264358421fcee2cb9660cef58c2ad861d"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_single_flow_ms1_xs456_L480_physical_extended/run.json",
+          "sha256": "4aa068828b3d16a41a8a19714fadc9a78e84ec164cd4c6d44c863ce19c0a906d"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_dual_head_ms1_xs456_L480_physical_extended/run.json",
+          "sha256": "4c114f5ed4f5c52e829024cd11f4f6699bf5d4585439ebfbb696c5fd9b8a35c1"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_single_flow_ms2_xs456_L480_physical_extended/run.json",
+          "sha256": "57150397884afcda61cf14ea18eb5201a8e2f7a1f28ad18401dea33b5e9bbaa9"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_dual_head_ms2_xs456_L480_physical_extended/run.json",
+          "sha256": "1afc62bbf8ec5f3c75ee86e80c77e26819dfbd7a8770b6dec5a69ba051203a49"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_single_flow_ms3_xs456_L480_physical_extended/run.json",
+          "sha256": "1e6aef05ca2d581e73bda1b70ab94ec2390c8b4f6b3d9f52bf7732b86c62037f"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout50_dual_head_ms3_xs456_L480_physical_extended/run.json",
+          "sha256": "1805e20cdf55bd48b994a19996ccecf1f2126f12f88314dcc4adabc38248cb34"
+        }
+      ]
+    },
+    "q70_mask42": {
+      "ratio": 0.7,
+      "mask_seed": 42,
+      "heldout": [
+        "01017000",
+        "01017290",
+        "01018000",
+        "01018009",
+        "01021200",
+        "01027200",
+        "01029200",
+        "01029500",
+        "01030500",
+        "01031450",
+        "01031510",
+        "01037380",
+        "01044550",
+        "01046000",
+        "01047150",
+        "01059000",
+        "01060000",
+        "01067950",
+        "01069500",
+        "01073000",
+        "01073587",
+        "01073785",
+        "01074520",
+        "01076000",
+        "01078000",
+        "01081500",
+        "01082000",
+        "01085000",
+        "01085500",
+        "01086000",
+        "01089100",
+        "01089500",
+        "01091000",
+        "01091500",
+        "01092000",
+        "01093852",
+        "01094000",
+        "01096000",
+        "01096500",
+        "010965852",
+        "01097000",
+        "01097300",
+        "01098530",
+        "01099500",
+        "01100000",
+        "01100505",
+        "01101000",
+        "01103280",
+        "01108000",
+        "01108410",
+        "01109060",
+        "01110000",
+        "01111212",
+        "01111500",
+        "01115630",
+        "01117370",
+        "01117800",
+        "01118300",
+        "01122500",
+        "01123000"
+      ],
+      "source_runs": [
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_single_flow_ms1_xs42_L480_extended/run.json",
+          "sha256": "9b1ab29ec09b1818550878435a00445b9e4a1c230f99bd21e3569b378664f3c9"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_dual_head_ms1_xs42_L480_extended/run.json",
+          "sha256": "eb9fda2fb31aee7830cb0e95167a4cac2b2bed3265b78bb83ab1f5b7ee80ca64"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_single_flow_ms2_xs42_L480_extended/run.json",
+          "sha256": "b6381188d92bbd1f5931f59b1aadbbb8625b502054468d1d987fd2b4b3894729"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_dual_head_ms2_xs42_L480_extended/run.json",
+          "sha256": "a4f8eb6d668675a40cc4a82250e5ecf14ce687af5d88c5347accc8389222ca7e"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_single_flow_ms3_xs42_L480_extended/run.json",
+          "sha256": "af5ad2d2ed3c34381090634f3a2aee705a8d93360322dfb5aa90f9ccc1bbf35e"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_dual_head_ms3_xs42_L480_extended/run.json",
+          "sha256": "b123c224fa52cfbf200366f0a8d066ee1b3e726e81081c1ceb475e9321721249"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_single_flow_ms1_xs42_L480_physical_extended/run.json",
+          "sha256": "0e194ff2837d0c51ecf78e0cca701a5f514f3771cea055168ff941adeb9ecd6f"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_dual_head_ms1_xs42_L480_physical_extended/run.json",
+          "sha256": "223dc6a433cc81e9163d1d255cadfb65280f1b2e494919ae5a3aa8fbc9fb3587"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_single_flow_ms2_xs42_L480_physical_extended/run.json",
+          "sha256": "c92bbd1a40fa97d76183b4ddac8526cf32d5c1e1135d484a3181f97740d9ba75"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_dual_head_ms2_xs42_L480_physical_extended/run.json",
+          "sha256": "75cc1321606faa85878821d77a362a6a0f5178609da29556d2f392851a065990"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_single_flow_ms3_xs42_L480_physical_extended/run.json",
+          "sha256": "96f5d39215f013d65faeea4e6645ffe7d381d573018c9044b0f7eaf722bf6184"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_dual_head_ms3_xs42_L480_physical_extended/run.json",
+          "sha256": "1c03d0d62d2503dad13e6bd1ab479e5a245018ef6e53f934a52cf67d7b531282"
+        }
+      ]
+    },
+    "q70_mask123": {
+      "ratio": 0.7,
+      "mask_seed": 123,
+      "heldout": [
+        "01017000",
+        "01017290",
+        "01017960",
+        "01018000",
+        "01018009",
+        "01029200",
+        "01029500",
+        "01030500",
+        "01031300",
+        "01031450",
+        "01031500",
+        "01031510",
+        "01037380",
+        "01044550",
+        "01046000",
+        "01054300",
+        "01055000",
+        "01059000",
+        "01060000",
+        "01067950",
+        "01068910",
+        "01069500",
+        "01069700",
+        "01072800",
+        "01073000",
+        "01073319",
+        "010735562",
+        "01073587",
+        "01073785",
+        "01075000",
+        "01076000",
+        "01076500",
+        "01081500",
+        "01082000",
+        "01085000",
+        "01089100",
+        "01089500",
+        "01091000",
+        "01092000",
+        "01093852",
+        "01094000",
+        "01096000",
+        "01097300",
+        "01098530",
+        "01099500",
+        "01100000",
+        "01100561",
+        "01101000",
+        "01103280",
+        "01108410",
+        "01109060",
+        "01109070",
+        "01109403",
+        "01109730",
+        "01111212",
+        "01111500",
+        "01115770",
+        "01119500",
+        "01122500",
+        "01123000"
+      ],
+      "source_runs": [
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_single_flow_ms1_xs123_L480_extended/run.json",
+          "sha256": "ba4f9e2391e68b9be997be588f1863279be2bf12b0cc95628b28206549838a98"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_dual_head_ms1_xs123_L480_extended/run.json",
+          "sha256": "62c3a764d517e50a46e9a08be32881016fa8975176bfb258a223b3027ae5fa5d"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_single_flow_ms2_xs123_L480_extended/run.json",
+          "sha256": "e6cee4900a6ed7c3a9b38f859cdb4b5bcf61f9240e01431dd62db63d83a46a24"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_dual_head_ms2_xs123_L480_extended/run.json",
+          "sha256": "33c940bfd5b78ab09320f962a653e4c3b3e70febf69fa1878b28b3972030ccd0"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_single_flow_ms3_xs123_L480_extended/run.json",
+          "sha256": "391fbfa1b67a65d81133ed9d354177ad59d02e4a3ab9ed10d2ad4a922e9ddfe0"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_dual_head_ms3_xs123_L480_extended/run.json",
+          "sha256": "0409a3e264331992a3c6b0ed47d5bee780bec211548a4ca6005de82b6fe156d2"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_single_flow_ms1_xs123_L480_physical_extended/run.json",
+          "sha256": "c1b75f5b1d2ad2278146442337ab6810b63a442b6aca1204be8819f9b0984161"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_dual_head_ms1_xs123_L480_physical_extended/run.json",
+          "sha256": "e0d18aa85d13c7afce0c75089a41606827022016468c949752fbb2e741cf4346"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_single_flow_ms2_xs123_L480_physical_extended/run.json",
+          "sha256": "2022696638014c21894c34338f3bd61fc880ec41d66c2180dd71a9039e284116"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_dual_head_ms2_xs123_L480_physical_extended/run.json",
+          "sha256": "f1cd7d054afc60d0943f0e79f6ba4021124b24e54783b1adb7d590a8faa4fe83"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_single_flow_ms3_xs123_L480_physical_extended/run.json",
+          "sha256": "1fb560bbcc57b523a81016bbb7c410c94b44cd0bff4be4ed2b78a206ca169d93"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_dual_head_ms3_xs123_L480_physical_extended/run.json",
+          "sha256": "c29f1a7d2f91774fa73d90b7c586a0721425197d4f7bc1741326db941c6d3ea7"
+        }
+      ]
+    },
+    "q70_mask456": {
+      "ratio": 0.7,
+      "mask_seed": 456,
+      "heldout": [
+        "01017000",
+        "01017290",
+        "01018000",
+        "01021200",
+        "01029500",
+        "01030500",
+        "01031450",
+        "01031500",
+        "01031510",
+        "01037380",
+        "01046000",
+        "01047150",
+        "01048220",
+        "01052500",
+        "01059000",
+        "01060000",
+        "01068910",
+        "01069500",
+        "01069700",
+        "01072800",
+        "01073000",
+        "01073319",
+        "01073500",
+        "010735562",
+        "01073587",
+        "01073785",
+        "01077400",
+        "01078000",
+        "01081500",
+        "01082000",
+        "01085000",
+        "01091000",
+        "01091500",
+        "01092000",
+        "01093852",
+        "01096500",
+        "01097000",
+        "01097300",
+        "01098530",
+        "01100000",
+        "01100561",
+        "01103280",
+        "01108000",
+        "01108410",
+        "01109000",
+        "01109060",
+        "01109403",
+        "01109730",
+        "01110000",
+        "01111212",
+        "01111300",
+        "01111500",
+        "01115630",
+        "01115770",
+        "01117370",
+        "01117800",
+        "01118300",
+        "01121000",
+        "01122500",
+        "01123000"
+      ],
+      "source_runs": [
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_single_flow_ms1_xs456_L480_extended/run.json",
+          "sha256": "e339fcd68c5e9676224969ee8e13b2ec54647594b70b6ec5447414c7054e0ed3"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_dual_head_ms1_xs456_L480_extended/run.json",
+          "sha256": "557b5122a22e625a5ba8347e2ded32c515bf06cfa2bcc059656eaf172911a5c6"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_single_flow_ms2_xs456_L480_extended/run.json",
+          "sha256": "29d3d927f846b71c49e075f98f274331fe05f4e4e3891951fbf79847cf00954a"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_dual_head_ms2_xs456_L480_extended/run.json",
+          "sha256": "9c75ae52160ae480f1c538c5b5aa6079ec0cfe1f3696ef65fc19ace31f0e4b0e"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_single_flow_ms3_xs456_L480_extended/run.json",
+          "sha256": "f252724f852edfac1ef191a95971844954617717ba88fe31e2732350d9ce9a23"
+        },
+        {
+          "run_json": "results/runs/4J_best_q_holdout70_dual_head_ms3_xs456_L480_extended/run.json",
+          "sha256": "b74098786feed3b3dbeecd655c560a87510f2dd310cc71d8bda52ed4e8885e69"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_single_flow_ms1_xs456_L480_physical_extended/run.json",
+          "sha256": "c95ae38a5657ca8505c16b9a26824e67397ded7bb7132bde8fa040367c77df8f"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_dual_head_ms1_xs456_L480_physical_extended/run.json",
+          "sha256": "bbdd71777c07ecb10dcfc3bde13a4797835fe64268f58f638a44e6493a75310d"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_single_flow_ms2_xs456_L480_physical_extended/run.json",
+          "sha256": "2dbc907bde941b98da4a78f6b6531f10dd1a157ee2945f2ee8af96ac0736117d"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_dual_head_ms2_xs456_L480_physical_extended/run.json",
+          "sha256": "c37104b8d32d10f103491764e084b2ecb5276d04a81ba3837fcd08f854e90443"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_single_flow_ms3_xs456_L480_physical_extended/run.json",
+          "sha256": "6b9238f90ff53476c5113e5d6fc8803afb56056d82cac91fcd47430c7248a377"
+        },
+        {
+          "run_json": "results/runs/4K_best_physical_q_holdout70_dual_head_ms3_xs456_L480_physical_extended/run.json",
+          "sha256": "c160096cb0400f2bda3fed9a7b61a6e09b74b653fd370a956daf90b216bba350"
+        }
+      ]
+    }
+  }
+}

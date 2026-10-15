@@ -55,11 +55,22 @@ def validate_population(prepared, expected_basins: list[str], expected_count: in
     prepared.time_valid = np.r_[True, delta == step]
 
 
-def heldout_split(basins: list[str], ratio: float, seed: int) -> tuple[list[str], list[str]]:
+def heldout_split(basins: list[str], ratio: float, seed: int,
+                  selection: str = "legacy_cross_section") -> tuple[list[str], list[str]]:
     if not 0 <= ratio < 1:
         raise ValueError("留出比例须满足0<=ratio<1")
     n = int(round(len(basins) * ratio))
-    selected = set(np.random.default_rng(seed).choice(sorted(basins), n, replace=False))
+    if selection == "original86":
+        # 精确复用原86 masking.py 的子种子与站号顺序，不能只复用种子数字。
+        from pipeline.masking import _subseed
+        indices = np.random.default_rng(_subseed(seed, "holdout_flow", "all")).choice(
+            len(basins), n, replace=False)
+        selected = {basins[i] for i in indices}
+    elif selection == "legacy_cross_section":
+        # 保留首轮已完成断面实验的历史口径，不改写其结果。
+        selected = set(np.random.default_rng(seed).choice(sorted(basins), n, replace=False))
+    else:
+        raise ValueError("未知的流域留出规则")
     held = [b for b in basins if b in selected]
     retained = [b for b in basins if b not in selected]
     if len(retained) < 3:

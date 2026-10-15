@@ -4,6 +4,7 @@
     [string]$GeometryMode = "snapshot",
     [string]$Stage = "both",
     [string]$OutDir = "",
+    [string]$Config = "",
     [switch]$PreflightOnly,
     [switch]$Smoke,
     [switch]$Setup
@@ -64,6 +65,7 @@ if ($Setup) { Write-Host "环境检查完成，尚未训练。"; exit 0 }
 $entry = Join-Path $PSScriptRoot "src\cross_section_experiment\runner.py"
 $arguments = @("-u", "-X", "utf8", $entry, "--device", $Device, "--geometry-mode", $GeometryMode, "--stage", $Stage)
 if ($OutDir) { $arguments += @("--out-dir", $OutDir) }
+if ($Config) { $arguments += @("--config", $Config) }
 if ($Smoke) { $arguments += "--smoke" }
 & $selectedPython @arguments --preflight
 if ($LASTEXITCODE -ne 0) { throw "预检失败，未启动正式训练。" }

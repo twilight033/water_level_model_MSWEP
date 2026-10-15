@@ -23,6 +23,7 @@ from cross_section_experiment.features import (
     shuffled_geometry, transform_geometry,
 )
 from cross_section_experiment.inference import infer
+from cross_section_experiment.reference import audit_references, reference_folder, reuse_h_checkpoint
 from cross_section_experiment.protocol import (
     PROTOCOL, WaterlevelOnlyPrepared, fingerprint, heldout_split, json_ready,
     q_masks, validate_population, with_attributes, write_json,
@@ -76,6 +77,9 @@ def settings_from_args(args):
                    train_stride=4096, valid_stride=512, test_stride=512,
                    batch_size=64, converter_epochs=2, converter_widths=[4],
                    converter_max_pairs_per_basin=64)
+        # 缩小后的烟雾模型不能冒充历史强模型，也不读取历史权重。
+        cfg.pop("reference_run_templates", None)
+        cfg["waterlevel_initialization"] = "train_from_scratch"
     if cfg["geometry_mode"] not in {"snapshot", "causal"}:
         raise ValueError("geometry_mode只能为snapshot或causal")
     if not cfg["ratios"] or not cfg["model_seeds"] or not cfg["mask_seeds"]:
@@ -91,6 +95,13 @@ def settings_from_args(args):
             raise ValueError(f"{key}必须为正整数")
     if not cfg["converter_widths"] or any(int(w) < 1 for w in cfg["converter_widths"]):
         raise ValueError("转换器候选宽度必须为正整数")
+    if cfg.get("waterlevel_initialization", "train_from_scratch") not in (
+            "train_from_scratch", "original_strong_checkpoint"):
+        raise ValueError("水位模型来源只能是重新训练或直接复用原强配置权重")
+    if cfg.get("waterlevel_initialization") == "original_strong_checkpoint" and not cfg.get("reference_run_templates"):
+        raise ValueError("直接复用水位模型时必须明确给出原强配置参考目录")
+    if cfg.get("target_scaling", "physical") not in ("physical", "observed"):
+        raise ValueError("Q归一化只能是physical或observed")
     return cfg
 
 
@@ -111,7 +122,8 @@ def scenario_list(cfg, basins):
     for ratio in cfg["ratios"]:
         # 完整标签条件不存在掩膜随机性，不重复跑三份相同实验。
         for mask_seed in (cfg["mask_seeds"][:1] if ratio == 0 else cfg["mask_seeds"]):
-            held, retained = heldout_split(basins, ratio, mask_seed)
+            held, retained = heldout_split(basins, ratio, mask_seed,
+                                          cfg.get("holdout_selection", "legacy_cross_section"))
             tag = f"q{round(ratio * 100):02d}_mask{mask_seed}"
             scenarios.append({"tag": tag, "ratio": ratio, "mask_seed": mask_seed,
                               "heldout": held, "retained": retained})
@@ -124,12 +136,17 @@ def make_train_config(cfg, architecture, seed, device):
         window_step_train=cfg["train_stride"], window_step_eval=cfg["valid_stride"],
         window_step_test=cfg["test_stride"], batch_size=cfg["batch_size"],
         hidden_size=cfg["hidden_size"], max_epochs=cfg["lstm_epochs"],
-        patience=None, target_scaling="physical", attr_set=cfg["attribute_set"],
+        patience=None, target_scaling=cfg.get("target_scaling", "physical"), attr_set=cfg["attribute_set"],
+        dropout_rate=cfg.get("dropout_rate", 0.2), learning_rate=cfg.get("learning_rate", 1e-3),
+        lr_schedule=cfg.get("lr_schedule", "cosine"), lr_min_factor=cfg.get("lr_min_factor", 0.02),
+        loss_norm=cfg.get("loss_norm", "per_valid"),
         model_seed=seed, device=device,
     )
 
 
 def preflight(prepared, geometry, audit, scenarios, cfg):
+    target_scaling = cfg.get("target_scaling", "physical")
+    observed_scale = target_scaling == "observed"
     report = {
         "protocol": PROTOCOL, "n_basins": len(prepared.basins),
         "geometry_mode": cfg["geometry_mode"],
@@ -139,7 +156,11 @@ def preflight(prepared, geometry, audit, scenarios, cfg):
         "n_geometry_missing": int(geometry.geom_missing.sum()),
         "n_post_train_geometry": int(audit.post_train_geometry.sum()),
         "geometry_is_full_absolute_cross_section": False,
-        "heldout_q_used_for_training_or_selection": False,
+        "target_scaling": target_scaling,
+        "heldout_q_used_for_training_or_selection": observed_scale,
+        "heldout_q_labels_used_in_loss_or_validation_score": False,
+        "heldout_q_statistics_used_for_scaling": observed_scale,
+        "information_boundary": "known_q_scale_control" if observed_scale else "q_scale_from_retained_basins",
         "original_frozen_split_uses_historical_q_availability": True,
         "n_time_discontinuities": int((~prepared.time_valid).sum()),
         "time_gap_policy": "exclude_windows_crossing_missing_3h_times",
@@ -151,7 +172,7 @@ def preflight(prepared, geometry, audit, scenarios, cfg):
     }
     for scenario in scenarios:
         hidden, hidden_valid = q_masks(prepared, scenario["heldout"])
-        scaling = prepared.make_scaling("physical", fit_basins=scenario["retained"])
+        scaling = prepared.make_scaling(target_scaling, fit_basins=scenario["retained"])
         ds_train = WindowDataset(prepared, "train", cfg["sequence_length"],
                                  cfg["train_stride"], hidden=hidden, scaling=scaling)
         ds_valid = WindowDataset(prepared, "valid", cfg["sequence_length"],
@@ -169,7 +190,8 @@ def preflight(prepared, geometry, audit, scenarios, cfg):
             **scenario, "n_train": len(ds_train), "n_valid": len(ds_valid),
             "train_label_counts": ds_train.label_counts(),
             "valid_label_counts": ds_valid.label_counts(),
-            "physical_scale_fit_basins": scenario["retained"],
+            "physical_scale_fit_basins": scenario["retained"] if not observed_scale else [],
+            "observed_q_scale_basins": prepared.basins if observed_scale else [],
         })
     return report
 
@@ -231,6 +253,7 @@ def flow_metrics(prepared, indices, positions, predicted, scenario, seed, stage,
             "model_seed": seed, "held_out": basin in scenario["heldout"],
             "geometry_available": not bool(geometry.loc[basin, "geom_missing"]),
             "geometry_mode": cfg["geometry_mode"], "h_input_source": input_source,
+            "target_scaling": cfg.get("target_scaling", "physical"),
             "smoke_not_paper_result": cfg["smoke"],
             "n_negative_predictions": int((pred[np.isfinite(pred)] < 0).sum()),
             **metrics,
@@ -247,9 +270,14 @@ def cached_h_prediction(prepared, cfg, seed, device, root, experiment_id):
     folder = root / "waterlevel_models" / f"seed{seed}"
     run_id = fingerprint({"experiment": experiment_id, "stage": "waterlevel_only", "seed": seed})
     # H模型的尺度视图完全不含Q，因此可跨Q掩膜情景复用。
-    view = WaterlevelOnlyPrepared(prepared)
-    blob = training_checkpoint(view, cfg, make_train_config(cfg, "single_waterlevel", seed, device),
-                               folder, run_id, fit_basins=prepared.basins)
+    train_cfg = make_train_config(cfg, "single_waterlevel", seed, device)
+    if cfg.get("waterlevel_initialization") == "original_strong_checkpoint":
+        source = reference_folder(ROOT, cfg, "single_waterlevel", seed)
+        print(f"直接复用原强配置H权重 seed{seed}: {source.name}", flush=True)
+        blob = reuse_h_checkpoint(prepared, cfg, train_cfg, source, folder, run_id)
+    else:
+        view = WaterlevelOnlyPrepared(prepared)
+        blob = training_checkpoint(view, cfg, train_cfg, folder, run_id, fit_basins=prepared.basins)
     path = folder / "prediction.npz"
     if not path.exists():
         result = infer(prepared, blob["state_dict"], blob["model_config"], "test",
@@ -294,7 +322,8 @@ def run_stage1(prepared, geometry, cfg, scenario, seed, g, g_shuffled, h_predict
         forced_width = chosen_geometry_width if variant.endswith("_shuffled") else None
         model, scale, metadata = fit_regional_converter(
             prepared, retained, static, cfg["converter_widths"], cfg["converter_epochs"],
-            seed, device, cfg["converter_max_pairs_per_basin"], forced_width)
+            seed, device, cfg["converter_max_pairs_per_basin"], forced_width,
+            target_scaling=cfg.get("target_scaling", "physical"))
         if variant == "h_attrs_geometry":
             chosen_geometry_width = metadata["hidden"]
         x = predicted_h[:, None]
@@ -391,7 +420,7 @@ def summarize(root: Path, experiment_id: str):
         return
     scores = pd.concat(frames, ignore_index=True)
     scores.to_csv(root / "all_basin_metrics.csv", index=False, encoding="utf-8-sig")
-    groups = ["stage", "variant", "ratio", "mask_seed", "model_seed", "h_input_source"]
+    groups = ["stage", "variant", "ratio", "mask_seed", "model_seed", "h_input_source", "target_scaling"]
     summary = []
     for key, sub in scores.groupby(groups, dropna=False):
         for scope in ("all_86", "q_heldout", "q_retained", "q_heldout_with_geometry"):
@@ -425,7 +454,7 @@ def summarize(root: Path, experiment_id: str):
         "geometry_converter_vs_geometry_dual": ("dual_head_geometry", "h_attrs_geometry"),
     }
     paired = []
-    keys = ["basin", "ratio", "mask_seed", "model_seed"]
+    keys = ["basin", "ratio", "mask_seed", "model_seed", "target_scaling"]
     for name, (model, control) in contrasts.items():
         left = deployed.loc[deployed.variant == model, keys + ["nse", "held_out", "geometry_available"]]
         right = deployed.loc[deployed.variant == control, keys + ["nse"]]
@@ -459,13 +488,14 @@ def main(argv=None):
     original = load_basin_ids()
     prepared = PreparedData(attr_set=cfg["attribute_set"])
     validate_population(prepared, original)
+    reference_audit = audit_references(ROOT, prepared, cfg, make_train_config)
     package_index = ROOT / "data/cross_sections/profiles/profile_index.csv"
     source_index = ROOT / "research_notes/USGS 原86 历年断面核验/profiles/profile_index.csv"
     index = args.profile_index or (package_index if package_index.exists() else source_index)
     geometry, audit = build_geometry(index, prepared.basins, prepared.splits, cfg["geometry_mode"])
     scenarios = scenario_list(cfg, prepared.basins)
     output = args.out_dir or ROOT / "results" / (
-        f"cross_section86_{cfg['geometry_mode']}" + ("_smoke" if args.smoke else ""))
+        cfg.get("output_name", f"cross_section86_{cfg['geometry_mode']}") + ("_smoke" if args.smoke else ""))
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     source_hashes = {name: file_sha256(ROOT / name) for name in DATA_FILES}
@@ -477,7 +507,11 @@ def main(argv=None):
         "protocol": PROTOCOL, "settings": cfg, "basins": prepared.basins,
         "scenarios": scenarios, "source_hashes": source_hashes, "code_hashes": code_hashes,
         "geometry_sources": audit.to_dict("records"),
-        "normalization": "original86_cached_attributes_onehot_identity; physical_q_from_retained",
+        "normalization": "original86_cached_attributes_onehot_identity; " + (
+            "observed_q_from_each_basin_training" if cfg.get("target_scaling", "physical") == "observed"
+            else "physical_q_from_retained"),
+        "target_scaling": cfg.get("target_scaling", "physical"),
+        "heldout_q_statistics_used_for_scaling": cfg.get("target_scaling", "physical") == "observed",
         "numerical_environment": {
             "python": sys.version.split()[0], "torch": torch.__version__,
             "numpy": np.__version__, "pandas": pd.__version__,
@@ -487,6 +521,8 @@ def main(argv=None):
         "frozen_splits_use_original_q_h_availability": True,
         "time_gap_policy": "exclude_windows_crossing_missing_3h_times",
     }
+    if reference_audit:
+        spec["reference_model_audit"] = reference_audit
     experiment_id = fingerprint(spec)
     manifest = output / "experiment.json"
     if manifest.exists():
@@ -498,13 +534,17 @@ def main(argv=None):
     geometry.to_csv(output / "geometry_features.csv", encoding="utf-8-sig")
     audit.to_csv(output / "geometry_audit.csv", index=False, encoding="utf-8-sig")
     report = preflight(prepared, geometry, audit, scenarios, cfg)
+    if reference_audit:
+        write_json(output / "reference_model_audit.json", reference_audit)
+        report["reference_model_audit"] = reference_audit
     write_json(output / "preflight.json", report)
     per_scenario = 6 if cfg["sham_controls"] else 4
     stage2_runs = len(scenarios) * len(cfg["model_seeds"]) * per_scenario
     stage1_h_runs = len(cfg["model_seeds"])
     print(f"原86总体={len(prepared.basins)}；有效断面={report['n_geometry_available']}；"
           f"事后断面={report['n_post_train_geometry']}；device={device}", flush=True)
-    print(f"阶段一H模型最多{stage1_h_runs}次；阶段二LSTM最多{stage2_runs}次；"
+    h_mode = "直接复用" if cfg.get("waterlevel_initialization") == "original_strong_checkpoint" else "训练"
+    print(f"阶段一{h_mode}{stage1_h_runs}个H模型；阶段二LSTM最多{stage2_runs}次；"
           "相同指纹的完成运行自动跳过。", flush=True)
     if cfg["geometry_mode"] == "snapshot":
         print("本实验使用2021—2023固定断面快照，属于给定事后几何信息的回溯研究。", flush=True)
