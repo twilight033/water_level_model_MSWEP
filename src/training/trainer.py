@@ -217,15 +217,46 @@ def _nse_by_basin(result: dict, task: str) -> np.ndarray:
     return np.array(scores)
 
 
+def validation_selection_score(means: dict, selected_tasks) -> float:
+    """仅根据指定验证任务选模；未指定任务的得分不参与比较。"""
+    selected_tasks = tuple(selected_tasks)
+    if not selected_tasks or len(set(selected_tasks)) != len(selected_tasks):
+        raise ValueError("选模任务须非空且不能重复")
+    if not set(selected_tasks).issubset(means):
+        raise ValueError("选模任务不在模型验证任务中")
+    values = [means[task] for task in selected_tasks]
+    if not np.isfinite(values).all():
+        raise ValueError("选模任务的验证NSE不是有限值")
+    return float(np.mean(values))
+
+
+class ValidationCheckpoint:
+    """旁路保存另一验证标准的最优权重，不改变优化、早停或主检查点。"""
+
+    def __init__(self, tasks):
+        self.tasks = tuple(tasks)
+        self.best_score = -float("inf")
+        self.best_epoch = 0
+        self.state_dict = None
+
+    def update(self, means, epoch, model):
+        score = validation_selection_score(means, self.tasks)
+        if score > self.best_score:
+            self.best_score, self.best_epoch = score, epoch
+            self.state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
 def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
                 hidden_valid: dict = None, basins: list = None,
                 fit_basins: list = None,
-                verbose: bool = True) -> dict:
+                verbose: bool = True, selection_tasks=None,
+                track_selection_tasks=None) -> dict:
     """完整训练一次并在测试集上评估，返回结果字典。
 
     ``hidden`` 只作用于训练段；``hidden_valid`` 仅用于那些真实无 Q 的外部
     流域实验，防止验证选模阶段读取本应不可得的径流标签。测试段永不屏蔽，
-    保留作最终盲评估。
+    保留作最终盲评估。selection_tasks省略时沿用全部任务平均选模；
+    track_selection_tasks仅旁路保存另一标准的最优权重，不改变训练轨迹。
     """
     set_seed(cfg.model_seed)
     model = build_model(cfg.architecture, forcing_size=prepared.forcing.shape[-1],
@@ -233,6 +264,12 @@ def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
                         hidden_size=cfg.hidden_size, dropout_rate=cfg.dropout_rate,
                         proj_size=cfg.proj_size).to(cfg.device)
     tasks = model.tasks
+    score_tasks = tuple(tasks if selection_tasks is None else selection_tasks)
+    if not set(score_tasks).issubset(tasks) or not score_tasks:
+        raise ValueError("选模任务必须属于模型任务且非空")
+    tracked = ValidationCheckpoint(track_selection_tasks) if track_selection_tasks is not None else None
+    if tracked is not None and (not tracked.tasks or not set(tracked.tasks).issubset(tasks)):
+        raise ValueError("旁路选模任务必须属于模型任务且非空")
 
     # 目标尺度：physical 模式下只用仍有径流标签的流域拟合，留出流域零径流观测
     scaling = prepared.make_scaling(
@@ -274,7 +311,9 @@ def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
         val = predict(model, va_loader, tasks, cfg.device)
         nse = {t: _nse_by_basin(val, t) for t in tasks}
         means = {t: (float(v.mean()) if v.size else float("nan")) for t, v in nse.items()}
-        score = float(np.mean([means[t] for t in tasks]))
+        score = validation_selection_score(means, score_tasks)
+        if tracked is not None:
+            tracked.update(means, epoch, model)
 
         history.append({"epoch": epoch, "train_loss": stats["loss"],
                         "val_nse": means, "score": score,
@@ -317,6 +356,11 @@ def train_model(prepared, cfg: TrainConfig, hidden: dict = None,
         "epochs_run": len(history),
         "hit_epoch_cap": len(history) >= cfg.max_epochs,
         "best_val_score": best_score,
+        "selection_tasks": list(score_tasks),
+        "tracked_checkpoint": None if tracked is None else {
+            "selection_tasks": list(tracked.tasks), "best_epoch": tracked.best_epoch,
+            "best_val_score": tracked.best_score, "state_dict": tracked.state_dict,
+        },
         "history": history,
         "elapsed_sec": elapsed,
         "n_train_samples": len(ds_train),

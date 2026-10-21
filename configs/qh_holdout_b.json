@@ -1,0 +1,9 @@
+{
+  "protocol": "original86_qh_train_valid_hidden_B_v1",
+  "output_root": "results/original86_qh_holdout_b_v1",
+  "q_output_root": "results/original86_q_selected_bc_v1",
+  "sources": {
+    "physical": "results/cross_section86_strong_physical_snapshot_v2",
+    "observed": "results/cross_section86_strong_observed_snapshot_v2"
+  }
+}
